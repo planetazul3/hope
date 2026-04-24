@@ -11,3 +11,4 @@ Key rules for this repository:
 - The runtime intentionally uses the legacy Deriv WebSocket API and token-based socket authorization. Do not change transport or auth flow without an explicit ADR-backed migration.
 - Prefer deterministic, auditable changes. Do not invent Deriv API fields or undocumented behavior.
 - Run `cargo fmt`, `cargo check --offline`, and `cargo test --offline` when applicable before claiming completion.
+- Use `python3 consolidate_project_sources.py` or `make consolidate` when generating an auditable project snapshot that includes notebooks.

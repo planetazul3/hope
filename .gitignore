@@ -7,3 +7,4 @@ __pycache__/
 *.onnx
 *.pt
 .codex
+*_merged_sources*.txt

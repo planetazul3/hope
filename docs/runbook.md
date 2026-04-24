@@ -36,6 +36,16 @@
 - `cargo check --offline`: compile-check the crate using the locked dependency set
 - `cargo test --offline`: run unit and integration tests using the locked dependency set
 - `cargo run`: start the trading system with `.env` configuration
+- `python3 consolidate_project_sources.py`: generate a timestamped audit snapshot of source, docs, config, and notebook contents
+- `make consolidate`: optional shorthand for the same audit snapshot command
+
+## Audit Snapshot Tool
+
+The repository includes `consolidate_project_sources.py` as a standalone audit utility. It:
+
+- consolidates source, docs, config, and notebook content into a single timestamped text file
+- excludes build artifacts, databases, model binaries, logs, and other non-source outputs
+- includes `notebooks/train_transformer.ipynb` content for audit purposes and annotates it with the related local training script at `scripts/train.py`
 
 ## Startup Behavior
 

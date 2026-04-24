@@ -10,6 +10,8 @@ Use Cargo for all local workflows.
 - `cargo check --offline` validates compilation quickly without producing a release binary.
 - `cargo fmt` applies standard Rust formatting.
 - `cargo test --offline` runs unit and integration tests; it may be minimal until more tests are added.
+- `python3 consolidate_project_sources.py` generates a timestamped audit snapshot of source, docs, config, and notebooks.
+- `make consolidate` runs the same audit snapshot command through the optional Makefile entry point.
 
 Run `cargo fmt && cargo check --offline && cargo test --offline` before opening a pull request. If offline resolution stops working because dependencies changed, restore dependency resolution first, regenerate `Cargo.lock`, and then update the documented commands if needed.
 

@@ -10,6 +10,7 @@ This directory contains the project documentation for `hope`, a Rust-based tradi
 - `runbook.md`: Local setup, runtime configuration, and operator-facing execution notes.
 - `adr/README.md`: ADR index and conventions.
 - `reference/README.md`: Read-only local notes for external systems and official vendor docs.
+- `../consolidate_project_sources.py`: Standalone audit tool for generating a single-file source snapshot, including notebook extraction.
 
 ## Documentation Rules
 
