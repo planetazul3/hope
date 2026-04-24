@@ -76,7 +76,7 @@ def prepare_features(prices, seq_len=16):
         # Target: 1 if next return is positive
         y.append(1.0 if returns[i+seq_len] > 0 else 0.0)
         
-    return torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.float32).unsqueeze(1)
+    return torch.from_numpy(np.array(x, dtype=np.float32)), torch.from_numpy(np.array(y, dtype=np.float32)).unsqueeze(1)
 
 def train_and_export():
     db_path = "/home/planetazul3/dev/LLM-Asset-Manager/data/tick_store.db"
