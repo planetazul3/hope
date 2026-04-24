@@ -16,3 +16,5 @@ This directory stores Architecture Decision Records (ADRs) for `hope`.
 - [0003 - Deterministic Model/System Separation](./0003-deterministic-model-system-separation.md)
 - [0004 - Nonblocking Tick Audit Logging](./0004-nonblocking-tick-audit-logging.md)
 - [0005 - Stay on Legacy Deriv WebSocket API Until Explicitly Replaced](./0005-stay-on-legacy-deriv-websocket-api-until-explicitly-replaced.md)
+- [0006 - Gaussian Probability Model](./0006-gaussian-probability-model.md)
+- [0007 - Neural Inference Integration](./0007-neural-inference-integration.md)

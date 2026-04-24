@@ -8,7 +8,7 @@
 
 1. `src/websocket_client.rs` maintains a single persistent Deriv WebSocket connection.
 2. Tick messages are routed into the engine as typed events.
-3. `src/tick_processor.rs` computes tick direction and streak while maintaining a fixed-size ring buffer of 64 entries.
+3. `src/tick_processor.rs` computes tick direction, streak, volatility, drift, return magnitude, and reversal timing while maintaining a fixed-size ring buffer of 64 entries.
 4. `src/fsm.rs` enforces explicit trade lifecycle transitions: `Idle`, `Evaluating`, `OrderPending`, `InPosition`, and `Cooldown`.
 5. `src/strategy.rs` evaluates the deterministic placeholder model and emits signals only during `Evaluating`.
 6. `src/execution.rs` enforces one API call per tick, minimum API spacing, and latency-based trade skipping.
@@ -18,7 +18,7 @@
 ## Core Boundaries
 
 - System layer: transport, tick processing, FSM, execution control, risk, and logging.
-- Model layer: probability estimation only. The current placeholder model always returns `0.6`.
+- Model layer: probability estimation only. The system supports replaceable models satisfying the `ProbabilityModel` trait (e.g., `GaussianModel` or `TransformerModel`).
 
 ## Connection Model
 

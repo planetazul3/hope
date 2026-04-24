@@ -6,6 +6,7 @@ mod risk;
 mod strategy;
 mod tick_logger;
 mod tick_processor;
+mod transformer;
 mod websocket_client;
 
 use anyhow::Result;

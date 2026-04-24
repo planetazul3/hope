@@ -20,4 +20,4 @@ This directory contains the project documentation for `hope`, a Rust-based tradi
 
 ## Current Focus
 
-The current documentation covers the system blueprint, staged roadmap, event-driven trading engine, deterministic FSM-centered execution flow, runtime configuration from `.env`, and the initial architectural decisions that shape the repository.
+The current documentation covers the system blueprint, staged roadmap, event-driven trading engine, deterministic FSM execution, and the transition from parametric Gaussian models to non-parametric neural inference (Stage 7).

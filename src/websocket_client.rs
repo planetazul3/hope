@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -20,9 +21,10 @@ use crate::{config::AppConfig, execution::ProposalSpec};
 // - Add deterministic message routing (tick/trade/error/other).
 // - Use non-blocking channel sends in the hot read loop.
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DerivWebSocketClient {
     cfg: AppConfig,
+    req_id_counter: AtomicU32,
 }
 
 #[derive(Debug)]
@@ -91,12 +93,16 @@ pub enum WebSocketCommand {
 #[derive(Serialize)]
 struct AuthorizeRequest<'a> {
     authorize: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
 }
 
 #[derive(Serialize)]
 struct TicksRequest<'a> {
     ticks: &'a str,
     subscribe: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -109,12 +115,16 @@ struct ProposalRequest<'a> {
     duration: u32,
     duration_unit: &'static str,
     symbol: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
 }
 
 #[derive(Serialize)]
 struct BuyRequest<'a> {
     buy: &'a str,
     price: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -122,11 +132,14 @@ struct ProposalOpenContractRequest {
     proposal_open_contract: u8,
     contract_id: u64,
     subscribe: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Envelope {
     msg_type: Option<String>,
+    req_id: Option<u32>,
     error: Option<ApiErrorPayload>,
     tick: Option<TickPayload>,
     proposal: Option<ProposalPayload>,
@@ -167,7 +180,14 @@ struct AuthorizePayload {
 
 impl DerivWebSocketClient {
     pub fn new(cfg: AppConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            req_id_counter: AtomicU32::new(1),
+        }
+    }
+
+    fn next_req_id(&self) -> u32 {
+        self.req_id_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     pub async fn run(
@@ -198,6 +218,7 @@ impl DerivWebSocketClient {
                         &mut write,
                         &AuthorizeRequest {
                             authorize: &self.cfg.token,
+                            req_id: Some(self.next_req_id()),
                         },
                     )
                     .await
@@ -208,6 +229,7 @@ impl DerivWebSocketClient {
                         &TicksRequest {
                             ticks: &self.cfg.symbol,
                             subscribe: 1,
+                            req_id: Some(self.next_req_id()),
                         },
                     )
                     .await
@@ -224,6 +246,7 @@ impl DerivWebSocketClient {
                                 proposal_open_contract: 1,
                                 contract_id,
                                 subscribe: 1,
+                                req_id: Some(self.next_req_id()),
                             },
                         )
                         .await
@@ -250,6 +273,7 @@ impl DerivWebSocketClient {
                                             duration: proposal.duration_ticks,
                                             duration_unit: "t",
                                             symbol: &proposal.symbol,
+                                            req_id: Some(self.next_req_id()),
                                         };
                                         self.send_json(&mut write, &request).await?;
                                     }
@@ -257,6 +281,7 @@ impl DerivWebSocketClient {
                                         self.send_json(&mut write, &BuyRequest {
                                             buy: &proposal_id,
                                             price,
+                                            req_id: Some(self.next_req_id()),
                                         }).await?;
                                     }
                                     WebSocketCommand::SubscribeOpenContract { contract_id } => {
@@ -265,6 +290,7 @@ impl DerivWebSocketClient {
                                             proposal_open_contract: 1,
                                             contract_id,
                                             subscribe: 1,
+                                            req_id: Some(self.next_req_id()),
                                         }).await?;
                                     }
                                     WebSocketCommand::ClearTrackedContract { contract_id } => {
@@ -323,8 +349,10 @@ impl DerivWebSocketClient {
         raw: &str,
     ) -> Result<()> {
         let envelope: Envelope = serde_json::from_str(raw).context("failed to decode message")?;
+        let req_id = envelope.req_id;
 
         if let Some(error) = envelope.error {
+            error!(?req_id, code = ?error.code, message = ?error.message, "api error received");
             return try_emit(
                 event_tx,
                 WebSocketEvent::ApiError(ApiErrorEvent {
@@ -338,6 +366,7 @@ impl DerivWebSocketClient {
         match envelope.msg_type.as_deref() {
             Some("authorize") => {
                 if let Some(authorize) = envelope.authorize {
+                    debug!(?req_id, "received authorization response");
                     try_emit(
                         event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::Authorized {
@@ -364,6 +393,7 @@ impl DerivWebSocketClient {
             }
             Some("proposal") => {
                 if let Some(proposal) = envelope.proposal {
+                    debug!(?req_id, proposal_id = %proposal.id, "received proposal");
                     try_emit(
                         event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::Proposal {
@@ -376,6 +406,7 @@ impl DerivWebSocketClient {
             }
             Some("buy") => {
                 if let Some(buy) = envelope.buy {
+                    info!(?req_id, contract_id = %buy.contract_id, "received buy acceptance");
                     try_emit(
                         event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::BuyAccepted {
@@ -443,9 +474,7 @@ fn try_emit(event_tx: &mpsc::Sender<WebSocketEvent>, event: WebSocketEvent) -> R
             warn!("websocket event channel full; dropping event");
             Ok(())
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            Err(anyhow!("websocket event channel closed"))
-        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(anyhow!("websocket event channel closed")),
     }
 }
 

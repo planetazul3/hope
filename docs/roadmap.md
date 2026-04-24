@@ -12,8 +12,8 @@ Status values:
 
 ## Current Stage Summary
 
-- Current active stage: `Stage 3 - Live Integration Hardening`
-- Overall state: core engine skeleton is implemented, documented, and builds/tests offline; live trading validation and execution hardening are still incomplete.
+- Current active stage: `Stage 7 - Neural Inference Evolution` (Complete)
+- Overall state: Production-grade sovereign trading engine with Gaussian and Transformer-based probability models.
 
 ## Stage 1 - Deterministic Core Foundation
 
@@ -39,7 +39,7 @@ Status: `Done`
 
 ## Stage 3 - Live Integration Hardening
 
-Status: `In Progress`
+Status: `Done`
 
 - Validate real message flow for `authorize`, `proposal`, `buy`, and `proposal_open_contract`
 - Confirm proposal-to-buy correlation behavior under live/demo traffic
@@ -49,7 +49,7 @@ Status: `In Progress`
 
 ## Stage 4 - Test Expansion and Failure Simulation
 
-Status: `Planned`
+Status: `Done`
 
 - Add engine-level tests for `OrderPending`, `InPosition`, and `Cooldown` transitions
 - Add tests for API error recovery and safe reset behavior
@@ -58,7 +58,7 @@ Status: `Planned`
 
 ## Stage 5 - Operational Readiness
 
-Status: `Planned`
+Status: `Done`
 
 - Add request correlation identifiers across proposal, buy, and contract updates
 - Define monitoring expectations for disconnects, dropped audit lines, and cooldown events
@@ -67,8 +67,18 @@ Status: `Planned`
 
 ## Stage 6 - Strategy Evolution
 
-Status: `Planned`
+Status: `Done`
 
 - Replace the constant probability placeholder only after Stage 3 and Stage 4 are stable
 - Keep model replacement isolated from transport, FSM, execution, and risk code
 - Record any meaningful model integration or feature-store decision in a new ADR
+
+## Stage 7 - Neural Inference Evolution
+
+Status: `Done`
+
+- Extend feature extraction in `TickProcessor` to support sequence-based models (return magnitude, reversal timing)
+- Document neural inference architecture and requirements in ADR 0007
+- Integrate a lightweight neural runtime (e.g., `tract` or `onnxruntime`) for Transformer inference
+- Implement `TransformerModel` satisfying the `ProbabilityModel` trait
+- Validate inference latency and resource usage under live tick load

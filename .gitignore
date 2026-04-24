@@ -2,3 +2,8 @@
 .env
 **/*.rs.bk
 *.log
+venv/
+__pycache__/
+*.onnx
+*.pt
+.codex

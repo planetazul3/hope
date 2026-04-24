@@ -8,6 +8,12 @@ pub enum DerivEnvironment {
     Real,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelType {
+    Gaussian,
+    Transformer,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub websocket_endpoint: String,
@@ -26,6 +32,9 @@ pub struct AppConfig {
     pub max_tick_latency: Duration,
     pub inbound_queue_capacity: usize,
     pub outbound_queue_capacity: usize,
+    pub trading_enabled: bool,
+    pub model_type: ModelType,
+    pub transformer_model_path: Option<String>,
 }
 
 impl AppConfig {
@@ -74,6 +83,16 @@ impl AppConfig {
             )?),
             inbound_queue_capacity: parse_or_default("DERIV_INBOUND_QUEUE_CAPACITY", 1024_usize)?,
             outbound_queue_capacity: parse_or_default("DERIV_OUTBOUND_QUEUE_CAPACITY", 128_usize)?,
+            trading_enabled: parse_or_default("DERIV_TRADING_ENABLED", false)?,
+            model_type: match env::var("MODEL_TYPE")
+                .unwrap_or_else(|_| "GAUSSIAN".to_string())
+                .to_ascii_uppercase()
+                .as_str()
+            {
+                "TRANSFORMER" => ModelType::Transformer,
+                _ => ModelType::Gaussian,
+            },
+            transformer_model_path: env::var("TRANSFORMER_MODEL_PATH").ok(),
         })
     }
 }

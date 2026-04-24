@@ -22,6 +22,10 @@ pub struct TickSnapshot {
     pub price: f64,
     pub direction: Direction,
     pub streak: u32,
+    pub volatility: f64,
+    pub drift: f64,
+    pub return_magnitude: f64,
+    pub ticks_since_reversal: u32,
 }
 
 #[derive(Debug)]
@@ -30,8 +34,10 @@ pub struct TickProcessor {
     next_index: usize,
     len: usize,
     last_price: Option<f64>,
+    last_trend_direction: Direction,
     last_direction: Direction,
     last_streak: u32,
+    ticks_since_reversal: u32,
 }
 
 impl TickProcessor {
@@ -43,8 +49,10 @@ impl TickProcessor {
             next_index: 0,
             len: 0,
             last_price: None,
+            last_trend_direction: Direction::Flat,
             last_direction: Direction::Flat,
             last_streak: 0,
+            ticks_since_reversal: 0,
         }
     }
 
@@ -64,26 +72,100 @@ impl TickProcessor {
             1
         };
 
-        let snapshot = TickSnapshot {
+        let return_magnitude = match self.last_price {
+            Some(prev) => (price - prev).abs(),
+            None => 0.0,
+        };
+
+        // Reversal is defined as a flip between Up and Down, even if Flat is in between.
+        if (direction == Direction::Up && self.last_trend_direction == Direction::Down)
+            || (direction == Direction::Down && self.last_trend_direction == Direction::Up)
+        {
+            self.ticks_since_reversal = 1;
+        } else if direction != Direction::Flat {
+            self.ticks_since_reversal += 1;
+        }
+
+        if direction != Direction::Flat {
+            self.last_trend_direction = direction;
+        }
+
+        let snapshot_without_stats = TickSnapshot {
             epoch,
             price,
             direction,
             streak,
+            volatility: 0.0,
+            drift: 0.0,
+            return_magnitude,
+            ticks_since_reversal: self.ticks_since_reversal,
         };
 
-        self.ring[self.next_index] = snapshot;
+        self.ring[self.next_index] = snapshot_without_stats;
         self.next_index = (self.next_index + 1) % Self::CAPACITY;
         self.len = self.len.saturating_add(1).min(Self::CAPACITY);
         self.last_price = Some(price);
         self.last_direction = direction;
         self.last_streak = streak;
 
+        // Calculate volatility and drift over the available history
+        let (volatility, drift) = self.calculate_stats();
+
+        let mut snapshot = snapshot_without_stats;
+        snapshot.volatility = volatility;
+        snapshot.drift = drift;
+
+        // Update the ring buffer entry with the calculated stats
+        let last_index = (self.next_index + Self::CAPACITY - 1) % Self::CAPACITY;
+        self.ring[last_index] = snapshot;
+
         snapshot
+    }
+
+    fn calculate_stats(&self) -> (f64, f64) {
+        if self.len < 2 {
+            return (0.0, 0.0);
+        }
+
+        let mut returns = Vec::with_capacity(self.len - 1);
+        for i in 0..self.len - 1 {
+            let curr_idx = (self.next_index + Self::CAPACITY - self.len + i) % Self::CAPACITY;
+            let next_idx = (curr_idx + 1) % Self::CAPACITY;
+            let curr_price = self.ring[curr_idx].price;
+            let next_price = self.ring[next_idx].price;
+
+            if curr_price > 0.0 {
+                returns.push(next_price - curr_price); // Use absolute returns for simplicity in tick-based systems
+            }
+        }
+
+        if returns.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let sum: f64 = returns.iter().sum();
+        let mean = sum / returns.len() as f64;
+
+        let sq_diff_sum: f64 = returns.iter().map(|r| (r - mean).powi(2)).sum();
+        let variance = sq_diff_sum / returns.len() as f64;
+        let std_dev = variance.sqrt();
+
+        (std_dev, mean)
     }
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn last_n_snapshots(&self, n: usize) -> Vec<TickSnapshot> {
+        let count = n.min(self.len);
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            let idx = (self.next_index + Self::CAPACITY - count + i) % Self::CAPACITY;
+            result.push(self.ring[idx]);
+        }
+        result
     }
 }
 
@@ -110,7 +192,40 @@ mod tests {
         for index in 0..128 {
             processor.push(index, index as f64);
         }
-
         assert_eq!(processor.len(), TickProcessor::CAPACITY);
+    }
+
+    #[test]
+    fn tracks_magnitude_and_reversal_timing() {
+        let mut processor = TickProcessor::new();
+
+        // 1. Initial tick
+        let s1 = processor.push(1, 100.0);
+        assert_eq!(s1.return_magnitude, 0.0);
+        assert_eq!(s1.ticks_since_reversal, 0);
+
+        // 2. Trend starts (Up)
+        let s2 = processor.push(2, 101.0);
+        assert_eq!(s2.return_magnitude, 1.0);
+        assert_eq!(s2.ticks_since_reversal, 1);
+
+        // 3. Trend continues (Up)
+        let s3 = processor.push(3, 103.0);
+        assert_eq!(s3.return_magnitude, 2.0);
+        assert_eq!(s3.ticks_since_reversal, 2);
+
+        // 4. Flat (should NOT reset reversal)
+        let s4 = processor.push(4, 103.0);
+        assert_eq!(s4.return_magnitude, 0.0);
+        assert_eq!(s4.ticks_since_reversal, 2); // Still 2 from the last active direction
+
+        // 5. Reversal (Down)
+        let s5 = processor.push(5, 102.0);
+        assert_eq!(s5.return_magnitude, 1.0);
+        assert_eq!(s5.ticks_since_reversal, 1); // Reset!
+
+        // 6. Trend continues (Down)
+        let s6 = processor.push(6, 101.0);
+        assert_eq!(s6.ticks_since_reversal, 2);
     }
 }

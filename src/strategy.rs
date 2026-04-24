@@ -4,15 +4,52 @@ use crate::{
 };
 
 pub trait ProbabilityModel {
-    fn probability_up(&self, tick: &TickSnapshot) -> f64;
+    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct ConstantModel;
 
 impl ProbabilityModel for ConstantModel {
-    fn probability_up(&self, _tick: &TickSnapshot) -> f64 {
+    fn probability_up(&self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
         0.6
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GaussianModel {
+    pub duration_ticks: u32,
+}
+
+impl ProbabilityModel for GaussianModel {
+    fn probability_up(&self, tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+        use statrs::distribution::{ContinuousCDF, Normal};
+
+        if tick.volatility <= 0.0 {
+            return 0.5;
+        }
+
+        let t_sqrt = (self.duration_ticks as f64).sqrt();
+        let x = (tick.drift * t_sqrt) / tick.volatility;
+
+        let n = Normal::new(0.0, 1.0).unwrap();
+        n.cdf(x)
+    }
+}
+
+pub enum AnyModel {
+    Constant(ConstantModel),
+    Gaussian(GaussianModel),
+    Transformer(crate::transformer::TransformerModel),
+}
+
+impl ProbabilityModel for AnyModel {
+    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
+        match self {
+            Self::Constant(m) => m.probability_up(tick, history),
+            Self::Gaussian(m) => m.probability_up(tick, history),
+            Self::Transformer(m) => m.probability_up(tick, history),
+        }
     }
 }
 
@@ -41,7 +78,12 @@ where
         Self { threshold, model }
     }
 
-    pub fn evaluate(&self, tick: &TickSnapshot, state: TradingState) -> StrategyDecision {
+    pub fn evaluate(
+        &self,
+        tick: &TickSnapshot,
+        history: &[TickSnapshot],
+        state: TradingState,
+    ) -> StrategyDecision {
         if state != TradingState::Evaluating || tick.streak < 2 {
             return StrategyDecision {
                 probability_up: 0.5,
@@ -49,7 +91,7 @@ where
             };
         }
 
-        let probability_up = self.model.probability_up(tick);
+        let probability_up = self.model.probability_up(tick, history);
         let probability_down = 1.0 - probability_up;
         let signal = match tick.direction {
             Direction::Up if probability_up >= self.threshold => Some(SignalDirection::Up),
@@ -71,17 +113,51 @@ mod tests {
 
     #[test]
     fn emits_signal_only_when_threshold_and_streak_match() {
-        let strategy = StrategyEngine::new(0.55, ConstantModel);
         let snapshot = TickSnapshot {
             epoch: 2,
             price: 101.0,
             direction: Direction::Up,
             streak: 2,
+            volatility: 0.5,
+            drift: 0.1,
+            ..Default::default()
         };
 
-        let decision = strategy.evaluate(&snapshot, TradingState::Evaluating);
+        let strategy = StrategyEngine::new(0.55, ConstantModel);
+        let decision = strategy.evaluate(&snapshot, &[], TradingState::Evaluating);
 
         assert_eq!(decision.probability_up, 0.6);
         assert_eq!(decision.signal, Some(SignalDirection::Up));
+    }
+
+    #[test]
+    fn gaussian_model_increases_probability_with_drift() {
+        let model = GaussianModel { duration_ticks: 5 };
+        
+        let snapshot_low_drift = TickSnapshot {
+            epoch: 1,
+            price: 100.0,
+            direction: Direction::Up,
+            streak: 1,
+            volatility: 1.0,
+            drift: 0.1,
+            ..Default::default()
+        };
+
+        let snapshot_high_drift = TickSnapshot {
+            epoch: 2,
+            price: 101.0,
+            direction: Direction::Up,
+            streak: 2,
+            volatility: 1.0,
+            drift: 0.5,
+            ..Default::default()
+        };
+
+        let prob_low = model.probability_up(&snapshot_low_drift, &[]);
+        let prob_high = model.probability_up(&snapshot_high_drift, &[]);
+
+        assert!(prob_low > 0.5);
+        assert!(prob_high > prob_low);
     }
 }

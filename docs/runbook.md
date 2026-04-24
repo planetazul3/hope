@@ -12,6 +12,7 @@
 - `DERIV_DEMO_TOKEN`: token used when `DERIV_ENVIRONMENT=DEMO`
 - `DERIV_REAL_TOKEN`: token used when `DERIV_ENVIRONMENT=REAL`
 - `DERIV_APP_ID`: Deriv application ID
+- `DERIV_TRADING_ENABLED`: `true` or `false` (defaults to `false` for safety)
 
 ## Optional Runtime Variables
 
@@ -51,6 +52,47 @@ On startup the system:
 - Structured logs are emitted to stdout.
 - Tick audit lines are appended to `tick_audit.log`.
 
-## Current Verification Limitation
+## Live Validation
+1. Set `DERIV_ENVIRONMENT=DEMO`.
+2. Set `DERIV_TRADING_ENABLED=false`.
+3. Run the bot: `cargo run`.
+4. Observe the logs. You should see "signal detected", followed by "proposal requested", and then "trading disabled; skipping buy".
+5. Once you are confident in the signals and timing, set `DERIV_TRADING_ENABLED=true` to allow demo trades.
 
-If the local environment cannot fetch missing Cargo dependencies, `cargo check` and `cargo test` may fail before compilation starts. In that case, restore dependency resolution first and rerun verification before shipping changes.
+## Expected Event Flow for a Trade
+1. **Tick Processing**: Bot receives ticks and updates internal state.
+2. **Strategy Evaluation**: Bot detects a signal based on the `DERIV_THRESHOLD`.
+3. **Proposal Request**: Bot sends a `proposal` request to Deriv to get a quote.
+4. **Proposal Received**: Bot receives a `proposal` response with an `id`.
+5. **Buy Execution**: Bot sends a `buy` request using the proposal `id`.
+6. **Buy Confirmation**: Bot receives a `buy` response confirming the contract.
+7. **Open Contract Monitoring**: Bot subscribes to updates for the open contract.
+8. **Trade Closed**: Bot receives a final `proposal_open_contract` update when the trade is sold.
+9. **Cooldown**: Bot enters a cooldown period if configured or after losses.
+
+## Operational Readiness
+
+### Monitoring Expectations
+*   **Disconnects**: The system will automatically attempt to reconnect. Monitor logs for `websocket disconnected` and `connected`.
+*   **API Errors**: `req_id` is now included in all API error logs to correlate with specific requests.
+*   **Dropped Audit Lines**: If the `tick_audit.log` channel is full, a warning will be logged. Ensure high I/O availability.
+*   **Cooldown Events**: Monitor for `entered cooldown` warnings, which indicate the risk manager has triggered a circuit breaker.
+
+### Operator Guidance
+
+#### Emergency Kill Switch
+*   **Immediate Halt**: Send `SIGINT` (Ctrl+C) to the process. The system will stop sending new requests immediately.
+*   **Safety Lock**: Ensure `DERIV_TRADING_ENABLED=false` in `.env` to prevent any accidental order placement during maintenance.
+
+#### Recovery and Safe Restart
+1.  **Stop the bot**: `Ctrl+C`.
+2.  **Verify State**: Check Deriv dashboard for any open contracts. The bot does not persist state across restarts yet; orphaned contracts must be managed manually if the bot was in `InPosition` state.
+3.  **Check Logs**: Review `tick_audit.log` for the last few trades to understand the reason for failure or cooldown.
+4.  **Restart**: Run `cargo run` after ensuring the environment is stable.
+
+#### Audit Completeness
+*   Every tick processed is logged to `tick_audit.log` with:
+    *   Timestamp and Price.
+    *   FSM State and Strategy Decision.
+    *   Processing Latency (ms).
+    *   Probability Model output.
