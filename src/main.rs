@@ -25,7 +25,13 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = rx.recv() => {
                 match event {
-                    Some(WebSocketEvent::TickRaw(raw)) => info!(payload = %raw, "tick frame"),
+                    Some(WebSocketEvent::Tick { raw }) => info!(payload = %raw, "tick frame"),
+                    Some(WebSocketEvent::Trade { msg_type, raw }) => {
+                        info!(msg_type = %msg_type, payload = %raw, "trade frame");
+                    }
+                    Some(WebSocketEvent::Other { msg_type, raw }) => {
+                        info!(?msg_type, payload = %raw, "other frame");
+                    }
                     Some(WebSocketEvent::ApiError { code, message, raw }) => {
                         error!(?code, ?message, payload = %raw, "api error frame");
                     }
