@@ -8,6 +8,16 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
+// Step 0 audit summary:
+// - WebSocket loop already uses a single persistent connection with reconnect.
+// - Existing message handling classified all non-error frames as ticks, risking state desync.
+// - `tx.send(...).await` in the read loop can block tick processing under backpressure.
+// - No per-message routing for tick/trade/system frames, which obscures downstream FSM control.
+// Step 1 fix focus:
+// - Keep single-connection lifecycle and reconnect semantics.
+// - Add deterministic message routing (tick/trade/error/other).
+// - Use non-blocking channel sends in the hot read loop.
+
 #[derive(Debug, Clone)]
 pub struct WebSocketClientConfig {
     pub endpoint: String,
@@ -29,7 +39,17 @@ impl Default for WebSocketClientConfig {
 
 #[derive(Debug)]
 pub enum WebSocketEvent {
-    TickRaw(String),
+    Tick {
+        raw: String,
+    },
+    Trade {
+        msg_type: String,
+        raw: String,
+    },
+    Other {
+        msg_type: Option<String>,
+        raw: String,
+    },
     ApiError {
         code: Option<String>,
         message: Option<String>,
@@ -109,13 +129,30 @@ impl DerivWebSocketClient {
                             Ok(Message::Text(text)) => {
                                 if let Some(error_event) = Self::to_api_error_event(&text) {
                                     warn!("received API error frame");
-                                    if tx.send(error_event).await.is_err() {
-                                        warn!("receiver dropped; stopping websocket client");
-                                        return Ok(());
+                                    match Self::send_event_nonblocking(&tx, error_event) {
+                                        Dispatch::Delivered => {}
+                                        Dispatch::ReceiverClosed => {
+                                            warn!("receiver dropped; stopping websocket client");
+                                            return Ok(());
+                                        }
+                                        Dispatch::Backpressure => {
+                                            warn!("channel backpressure on API error event; reconnecting");
+                                            break;
+                                        }
                                     }
-                                } else if tx.send(WebSocketEvent::TickRaw(text)).await.is_err() {
-                                    warn!("receiver dropped; stopping websocket client");
-                                    return Ok(());
+                                } else {
+                                    let routed_event = Self::route_message(text);
+                                    match Self::send_event_nonblocking(&tx, routed_event) {
+                                        Dispatch::Delivered => {}
+                                        Dispatch::ReceiverClosed => {
+                                            warn!("receiver dropped; stopping websocket client");
+                                            return Ok(());
+                                        }
+                                        Dispatch::Backpressure => {
+                                            warn!("channel backpressure on routed event; reconnecting");
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             Ok(Message::Ping(payload)) => {
@@ -169,7 +206,50 @@ impl DerivWebSocketClient {
         })
     }
 
-    async fn send_status(tx: &mpsc::Sender<WebSocketEvent>, status: WebSocketStatus) {
-        let _ = tx.send(WebSocketEvent::Status(status)).await;
+    fn route_message(raw: String) -> WebSocketEvent {
+        let msg_type = serde_json::from_str::<DerivEnvelope>(&raw)
+            .ok()
+            .and_then(|envelope| envelope.msg_type);
+
+        match msg_type {
+            Some(msg_type) if msg_type == "tick" => WebSocketEvent::Tick { raw },
+            Some(msg_type) if Self::is_trade_message(&msg_type) => {
+                WebSocketEvent::Trade { msg_type, raw }
+            }
+            _ => WebSocketEvent::Other { msg_type, raw },
+        }
     }
+
+    fn is_trade_message(msg_type: &str) -> bool {
+        matches!(
+            msg_type,
+            "buy" | "proposal_open_contract" | "sell" | "transaction"
+        )
+    }
+
+    fn send_event_nonblocking(
+        tx: &mpsc::Sender<WebSocketEvent>,
+        event: WebSocketEvent,
+    ) -> Dispatch {
+        match tx.try_send(event) {
+            Ok(()) => Dispatch::Delivered,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Dispatch::ReceiverClosed,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Dispatch::Backpressure,
+        }
+    }
+
+    async fn send_status(tx: &mpsc::Sender<WebSocketEvent>, status: WebSocketStatus) {
+        if let Dispatch::Backpressure =
+            Self::send_event_nonblocking(tx, WebSocketEvent::Status(status))
+        {
+            warn!("status event dropped due to channel backpressure");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dispatch {
+    Delivered,
+    ReceiverClosed,
+    Backpressure,
 }
