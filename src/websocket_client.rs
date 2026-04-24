@@ -78,7 +78,7 @@ pub enum TradeUpdate {
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenContractUpdate {
     pub contract_id: u64,
-    pub is_sold: Option<bool>,
+    pub is_sold: Option<i32>,
     pub profit: Option<f64>,
 }
 
@@ -348,7 +348,13 @@ impl DerivWebSocketClient {
         event_tx: &mpsc::Sender<WebSocketEvent>,
         raw: &str,
     ) -> Result<()> {
-        let envelope: Envelope = serde_json::from_str(raw).context("failed to decode message")?;
+        let envelope: Envelope = match serde_json::from_str(raw) {
+            Ok(env) => env,
+            Err(err) => {
+                warn!(error = %err, "failed to decode message; ignoring");
+                return Ok(());
+            }
+        };
         let req_id = envelope.req_id;
 
         if let Some(error) = envelope.error {

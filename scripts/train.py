@@ -118,6 +118,7 @@ def train_and_export():
             
     # Export to ONNX
     dummy_input = torch.randn(1, seq_len, input_dim)
+    dummy_input = torch.randn(1, seq_len, input_dim).to(device)
     onnx_path = "model.onnx"
     
     print(f"Exporting to {onnx_path}...")
@@ -131,7 +132,8 @@ def train_and_export():
         opset_version=11,
         do_constant_folding=True,
         input_names=['input'],
-        output_names=['output']
+        output_names=['output'],
+        training=torch.onnx.TrainingMode.EVAL
     )
     print("Done.")
 

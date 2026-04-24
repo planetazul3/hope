@@ -251,6 +251,7 @@ impl Engine {
                     }
 
                     self.fsm.transition(TradingState::OrderPending)?;
+                    self.order_sent_at = Some(tick_started_at);
                     self.tick_logger.try_log(
                         snapshot,
                         decision.probability_up,
@@ -305,7 +306,7 @@ impl Engine {
                     info!(%contract_id, %buy_price, "buy confirmed");
                 }
                 TradeUpdate::OpenContract(update) => {
-                    if update.is_sold.unwrap_or(false) {
+                    if update.is_sold.unwrap_or(0) == 1 {
                         let profit = update.profit.unwrap_or(0.0);
                         let outcome = self.risk.on_trade_closed(profit);
                         let closed_contract_id = update.contract_id;

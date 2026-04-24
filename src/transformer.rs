@@ -44,11 +44,16 @@ impl TransformerModel {
         let input = tract_ndarray::Array3::from_shape_vec((1, self.sequence_length, 5), data)
             .map_err(|err| anyhow!("failed to build input tensor: {err}"))?;
         
-        let result = self.model.run(tvec!(input.into_tensor().into()))?;
-        let output = result[0].to_array_view::<f32>()?;
+        let outputs = self.model.run(tvec!(input.into_tensor().into()))?;
+        let output = outputs[0].to_array_view::<f32>()?;
         
-        // Assume output is a single float representing P(Up)
-        Ok(output[0] as f64)
+        // Safe indexing to avoid rank mismatch panics
+        let prob = output.as_slice()
+            .and_then(|s| s.get(0))
+            .copied()
+            .ok_or_else(|| anyhow!("Empty model output"))?;
+            
+        Ok(prob as f64)
     }
 }
 

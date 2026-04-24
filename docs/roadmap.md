@@ -82,3 +82,4 @@ Status: `Done`
 - Integrate a lightweight neural runtime (e.g., `tract` or `onnxruntime`) for Transformer inference
 - Implement `TransformerModel` satisfying the `ProbabilityModel` trait
 - Validate inference latency and resource usage under live tick load
+- Hardened Transformer inference with safe indexing and robust ONNX export (Stage 7 Complete)

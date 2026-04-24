@@ -1,0 +1,1720 @@
+mod config;
+mod engine;
+mod execution;
+mod fsm;
+mod risk;
+mod strategy;
+mod tick_logger;
+mod tick_processor;
+mod transformer;
+mod websocket_client;
+
+use anyhow::Result;
+use config::AppConfig;
+use tracing::info;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            std::env::var("LOG_LEVEL")
+                .map(|level| format!("{level},hope=debug"))
+                .unwrap_or_else(|_| "info,hope=debug".to_string()),
+        )
+        .with_target(false)
+        .compact()
+        .init();
+
+    let config = AppConfig::load()?;
+    info!(environment = ?config.deriv_environment, symbol = %config.symbol, "starting trading engine");
+    engine::run(config).await
+}
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
+
+use crate::{
+    config::AppConfig,
+    execution::{ExecutionEngine, ProposalQuote, ProposalSpec},
+    fsm::{TradingFsm, TradingState},
+    risk::RiskManager,
+    strategy::{AnyModel, GaussianModel, SignalDirection, StrategyEngine},
+    tick_logger::TickLogger,
+    tick_processor::TickProcessor,
+    websocket_client::{
+        ApiErrorEvent, ConnectionStatus, DerivWebSocketClient, TradeUpdate, WebSocketCommand,
+        WebSocketEvent,
+    },
+};
+
+// Audit summary:
+// - The original repository had a single websocket reader that forwarded raw text frames.
+// - There was no FSM, no fixed-size tick processor, no rate limiting, and no risk controls.
+// - The websocket task could await on bounded channel sends, which can block frame handling.
+// - Trade state could not be synchronized because no typed buy/open-contract updates existed.
+
+pub async fn run(config: AppConfig) -> Result<()> {
+    let tick_logger = TickLogger::start("tick_audit.log", 4096);
+    let (event_tx, mut event_rx) = mpsc::channel::<WebSocketEvent>(config.inbound_queue_capacity);
+    let (command_tx, command_rx) =
+        mpsc::channel::<WebSocketCommand>(config.outbound_queue_capacity);
+
+    let client = DerivWebSocketClient::new(config.clone());
+    let client_task = tokio::spawn(async move { client.run(event_tx, command_rx).await });
+
+    let mut engine = Engine::new(config, tick_logger);
+
+    while let Some(event) = event_rx.recv().await {
+        engine.handle_event(event, &command_tx)?;
+    }
+
+    let join_result = client_task.await.map_err(|err| anyhow!(err))?;
+    if let Err(err) = join_result {
+        error!(error = %err, "websocket task failed");
+    }
+
+    Ok(())
+}
+
+struct Engine {
+    config: AppConfig,
+    tick_processor: TickProcessor,
+    fsm: TradingFsm,
+    strategy: StrategyEngine<AnyModel>,
+    execution: ExecutionEngine,
+    risk: RiskManager,
+    cooldown_remaining: u32,
+    pending_proposal: Option<PendingProposal>,
+    active_contract_id: Option<u64>,
+    order_sent_at: Option<Instant>,
+    proposal_timeout: Duration,
+    order_pending_timeout: Duration,
+    tick_logger: TickLogger,
+}
+
+impl Engine {
+    fn new(config: AppConfig, tick_logger: TickLogger) -> Self {
+        let model = match config.model_type {
+            crate::config::ModelType::Transformer => {
+                if let Some(path) = &config.transformer_model_path {
+                    match crate::transformer::TransformerModel::load(path, 16) {
+                        Ok(m) => AnyModel::Transformer(m),
+                        Err(err) => {
+                            error!(error = %err, path = %path, "failed to load transformer model; falling back to Gaussian");
+                            AnyModel::Gaussian(GaussianModel {
+                                duration_ticks: config.duration_ticks,
+                            })
+                        }
+                    }
+                } else {
+                    warn!("transformer model path not configured; falling back to Gaussian");
+                    AnyModel::Gaussian(GaussianModel {
+                        duration_ticks: config.duration_ticks,
+                    })
+                }
+            }
+            crate::config::ModelType::Gaussian => AnyModel::Gaussian(GaussianModel {
+                duration_ticks: config.duration_ticks,
+            }),
+        };
+
+        Self {
+            strategy: StrategyEngine::new(config.probability_threshold, model),
+            execution: ExecutionEngine::new(config.min_api_interval, config.max_tick_latency),
+            risk: RiskManager::new(3),
+            config,
+            tick_processor: TickProcessor::new(),
+            fsm: TradingFsm::new(),
+            cooldown_remaining: 0,
+            pending_proposal: None,
+            active_contract_id: None,
+            order_sent_at: None,
+            proposal_timeout: Duration::from_secs(60),
+            order_pending_timeout: Duration::from_secs(10),
+            tick_logger,
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        event: WebSocketEvent,
+        command_tx: &mpsc::Sender<WebSocketCommand>,
+    ) -> Result<()> {
+        match event {
+            WebSocketEvent::Tick(tick) => {
+                let tick_started_at = Instant::now();
+                let snapshot = self.tick_processor.push(tick.epoch, tick.quote);
+                self.execution.on_tick(snapshot.epoch, tick_started_at);
+
+                if self.fsm.state() == TradingState::Cooldown {
+                    self.cooldown_remaining = self.cooldown_remaining.saturating_sub(1);
+                    if self.cooldown_remaining == 0 {
+                        self.fsm.transition(TradingState::Idle)?;
+                    }
+                    self.tick_logger.try_log(
+                        snapshot,
+                        0.5,
+                        "cooldown",
+                        self.fsm.state(),
+                        tick_started_at.elapsed().as_millis(),
+                    );
+                    return Ok(());
+                }
+
+                if self.fsm.state() == TradingState::InPosition || self.active_contract_id.is_some()
+                {
+                    self.tick_logger.try_log(
+                        snapshot,
+                        0.5,
+                        "in_position",
+                        self.fsm.state(),
+                        tick_started_at.elapsed().as_millis(),
+                    );
+                    return Ok(());
+                }
+
+                if self.fsm.state() == TradingState::OrderPending && self.pending_proposal.is_none()
+                {
+                    if let Some(sent_at) = self.order_sent_at {
+                        if tick_started_at.duration_since(sent_at) > self.order_pending_timeout {
+                            warn!("order pending timeout exceeded; resetting to idle");
+                            safe_reset(&mut self.fsm);
+                            self.order_sent_at = None;
+                        }
+                    }
+
+                    self.tick_logger.try_log(
+                        snapshot,
+                        0.5,
+                        "awaiting_proposal_or_buy",
+                        self.fsm.state(),
+                        tick_started_at.elapsed().as_millis(),
+                    );
+                    return Ok(());
+                }
+
+                if self.fsm.state() == TradingState::Idle {
+                    self.fsm.transition(TradingState::Evaluating)?;
+                }
+
+                if let Some(ready) = self.pending_proposal.take() {
+                    if tick_started_at.duration_since(ready.received_at) > self.proposal_timeout {
+                        warn!("discarding stale proposal");
+                        safe_reset(&mut self.fsm);
+                        return Ok(());
+                    }
+
+                    if !self.config.trading_enabled {
+                        info!(proposal_id = %ready.quote.id, "trading disabled; skipping buy");
+                        safe_reset(&mut self.fsm);
+                        self.tick_logger.try_log(
+                            snapshot,
+                            ready.probability_up,
+                            "trading_disabled",
+                            self.fsm.state(),
+                            tick_started_at.elapsed().as_millis(),
+                        );
+                        return Ok(());
+                    }
+
+                    if let Err(reason) = try_send_buy(
+                        &mut self.execution,
+                        command_tx,
+                        &ready.quote,
+                        tick_started_at,
+                    ) {
+                        warn!(?reason, "buy skipped");
+                        let probability_up = ready.probability_up;
+                        self.pending_proposal = Some(ready);
+                        self.fsm.transition(TradingState::OrderPending)?;
+                        self.tick_logger.try_log(
+                            snapshot,
+                            probability_up,
+                            "buy_skipped",
+                            self.fsm.state(),
+                            tick_started_at.elapsed().as_millis(),
+                        );
+                        return Ok(());
+                    }
+
+                    self.fsm.transition(TradingState::OrderPending)?;
+                    self.order_sent_at = Some(tick_started_at);
+                    self.tick_logger.try_log(
+                        snapshot,
+                        ready.probability_up,
+                        "buy_sent",
+                        self.fsm.state(),
+                        tick_started_at.elapsed().as_millis(),
+                    );
+                    return Ok(());
+                }
+
+                let history = self.tick_processor.last_n_snapshots(16);
+                let decision = self.strategy.evaluate(&snapshot, &history, self.fsm.state());
+                if let Some(signal) = decision.signal {
+                    let proposal_spec = ProposalSpec {
+                        contract_type: self.config.contract_type.clone(),
+                        currency: self.config.currency.clone(),
+                        amount: self.config.stake,
+                        duration_ticks: self.config.duration_ticks,
+                        symbol: self.config.symbol.clone(),
+                    };
+                    let proposal_spec = self.execution.build_proposal(signal, &proposal_spec);
+
+                    if let Err(reason) = try_send_proposal(
+                        &mut self.execution,
+                        command_tx,
+                        proposal_spec,
+                        tick_started_at,
+                    ) {
+                        warn!(?reason, "proposal skipped");
+                        self.fsm.transition(TradingState::Idle)?;
+                        self.tick_logger.try_log(
+                            snapshot,
+                            decision.probability_up,
+                            "proposal_skipped",
+                            self.fsm.state(),
+                            tick_started_at.elapsed().as_millis(),
+                        );
+                        return Ok(());
+                    }
+
+                    self.fsm.transition(TradingState::OrderPending)?;
+                    self.tick_logger.try_log(
+                        snapshot,
+                        decision.probability_up,
+                        signal_label(signal),
+                        self.fsm.state(),
+                        tick_started_at.elapsed().as_millis(),
+                    );
+                } else {
+                    self.fsm.transition(TradingState::Idle)?;
+                    self.tick_logger.try_log(
+                        snapshot,
+                        decision.probability_up,
+                        "no_signal",
+                        self.fsm.state(),
+                        tick_started_at.elapsed().as_millis(),
+                    );
+                }
+            }
+            WebSocketEvent::TradeUpdate(update) => match update {
+                TradeUpdate::Authorized { login_id, currency } => {
+                    info!(%login_id, %currency, "authorized websocket session");
+                }
+                TradeUpdate::Proposal {
+                    id,
+                    ask_price,
+                    probability_up,
+                } => {
+                    self.pending_proposal = Some(PendingProposal {
+                        quote: ProposalQuote { id, ask_price },
+                        probability_up,
+                        received_at: Instant::now(),
+                    });
+                    if self.fsm.state() != TradingState::OrderPending {
+                        safe_reset(&mut self.fsm);
+                        self.fsm.transition(TradingState::OrderPending)?;
+                    }
+                }
+                TradeUpdate::BuyAccepted {
+                    contract_id,
+                    buy_price,
+                } => {
+                    self.active_contract_id = Some(contract_id);
+                    self.pending_proposal = None;
+                    self.order_sent_at = None;
+                    self.fsm.transition(TradingState::InPosition)?;
+                    if command_tx
+                        .try_send(WebSocketCommand::SubscribeOpenContract { contract_id })
+                        .is_err()
+                    {
+                        error!("failed to queue open contract subscription");
+                    }
+                    info!(%contract_id, %buy_price, "buy confirmed");
+                }
+                TradeUpdate::OpenContract(update) => {
+                    if update.is_sold.unwrap_or(false) {
+                        let profit = update.profit.unwrap_or(0.0);
+                        let outcome = self.risk.on_trade_closed(profit);
+                        let closed_contract_id = update.contract_id;
+                        self.active_contract_id = None;
+                        let _ = command_tx.try_send(WebSocketCommand::ClearTrackedContract {
+                            contract_id: closed_contract_id,
+                        });
+
+                        if outcome.enter_cooldown {
+                            self.cooldown_remaining = self.config.cooldown_ticks;
+                            if self.fsm.state() == TradingState::InPosition {
+                                self.fsm.transition(TradingState::Cooldown)?;
+                            } else {
+                                safe_reset(&mut self.fsm);
+                                self.fsm.transition(TradingState::Cooldown)?;
+                            }
+                            warn!(
+                                consecutive_losses = outcome.consecutive_losses,
+                                cooldown_ticks = self.cooldown_remaining,
+                                "entered cooldown"
+                            );
+                        } else {
+                            safe_reset(&mut self.fsm);
+                        }
+                    }
+                }
+            },
+            WebSocketEvent::ApiError(ApiErrorEvent { code, message, raw }) => {
+                error!(?code, ?message, payload = %raw, "api error; skipping");
+                if self.fsm.state() == TradingState::OrderPending {
+                    safe_reset(&mut self.fsm);
+                    self.pending_proposal = None;
+                }
+            }
+            WebSocketEvent::Status(status) => match status {
+                ConnectionStatus::Connecting => info!("connecting"),
+                ConnectionStatus::Connected => info!("connected"),
+                ConnectionStatus::Authorized => info!("authorized"),
+                ConnectionStatus::SubscribedTicks => info!("tick subscription active"),
+                ConnectionStatus::Disconnected => {
+                    warn!("websocket disconnected");
+                }
+            },
+        }
+        Ok(())
+    }
+}
+
+fn try_send_proposal(
+    execution: &mut ExecutionEngine,
+    command_tx: &mpsc::Sender<WebSocketCommand>,
+    proposal: ProposalSpec,
+    now: Instant,
+) -> Result<(), crate::execution::ExecutionSkipReason> {
+    execution.permit_api_call(now)?;
+    command_tx
+        .try_send(WebSocketCommand::RequestProposal { proposal })
+        .map_err(|_| crate::execution::ExecutionSkipReason::ApiPerTickLimit)?;
+    Ok(())
+}
+
+fn try_send_buy(
+    execution: &mut ExecutionEngine,
+    command_tx: &mpsc::Sender<WebSocketCommand>,
+    quote: &ProposalQuote,
+    now: Instant,
+) -> Result<(), crate::execution::ExecutionSkipReason> {
+    execution.permit_api_call(now)?;
+    command_tx
+        .try_send(WebSocketCommand::Buy {
+            proposal_id: quote.id.clone(),
+            price: quote.ask_price,
+        })
+        .map_err(|_| crate::execution::ExecutionSkipReason::ApiPerTickLimit)?;
+    Ok(())
+}
+
+fn signal_label(signal: SignalDirection) -> &'static str {
+    match signal {
+        SignalDirection::Up => "proposal_call",
+        SignalDirection::Down => "proposal_put",
+    }
+}
+
+fn safe_reset(fsm: &mut TradingFsm) {
+    if fsm.state() != TradingState::Idle {
+        fsm.reset_to_idle();
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingProposal {
+    quote: ProposalQuote,
+    probability_up: f64,
+    received_at: Instant,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::websocket_client::TickEvent;
+
+    fn mock_config() -> AppConfig {
+        AppConfig {
+            websocket_endpoint: "wss://example.com".to_string(),
+            app_id: 1089,
+            deriv_environment: crate::config::DerivEnvironment::Demo,
+            token: "token".to_string(),
+            symbol: "R_100".to_string(),
+            contract_type: "CALL".to_string(),
+            currency: "USD".to_string(),
+            stake: 1.0,
+            duration_ticks: 5,
+            probability_threshold: 0.55,
+            reconnect_backoff: Duration::from_secs(1),
+            min_api_interval: Duration::from_millis(10),
+            cooldown_ticks: 3,
+            max_tick_latency: Duration::from_millis(100),
+            inbound_queue_capacity: 10,
+            outbound_queue_capacity: 10,
+            trading_enabled: true,
+            model_type: crate::config::ModelType::Gaussian,
+            transformer_model_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fsm_cooldown_decrement() -> Result<()> {
+        let logger = TickLogger::start("/dev/null", 10);
+        let mut engine = Engine::new(mock_config(), logger);
+        let (command_tx, _command_rx) = mpsc::channel(10);
+
+        engine.fsm.transition(TradingState::Cooldown)?;
+        engine.cooldown_remaining = 2;
+
+        // First tick -> cooldown 1
+        engine.handle_event(
+            WebSocketEvent::Tick(TickEvent {
+                epoch: 1,
+                quote: 100.0,
+            }),
+            &command_tx,
+        )?;
+        assert_eq!(engine.fsm.state(), TradingState::Cooldown);
+        assert_eq!(engine.cooldown_remaining, 1);
+
+        // Second tick -> cooldown 0 -> Idle
+        engine.handle_event(
+            WebSocketEvent::Tick(TickEvent {
+                epoch: 2,
+                quote: 100.1,
+            }),
+            &command_tx,
+        )?;
+        assert_eq!(engine.fsm.state(), TradingState::Idle);
+        assert_eq!(engine.cooldown_remaining, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_order_pending_timeout() -> Result<()> {
+        let logger = TickLogger::start("/dev/null", 10);
+        let mut engine = Engine::new(mock_config(), logger);
+        let (command_tx, _command_rx) = mpsc::channel(10);
+
+        // Transition to OrderPending via Evaluating
+        engine.fsm.transition(TradingState::Evaluating)?;
+        engine.fsm.transition(TradingState::OrderPending)?;
+        engine.order_sent_at = Some(Instant::now() - Duration::from_secs(11));
+
+        // Tick should trigger timeout
+        engine.handle_event(
+            WebSocketEvent::Tick(TickEvent {
+                epoch: 1,
+                quote: 100.0,
+            }),
+            &command_tx,
+        )?;
+        assert_eq!(engine.fsm.state(), TradingState::Idle);
+        assert!(engine.order_sent_at.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stale_proposal_discard() -> Result<()> {
+        let logger = TickLogger::start("/dev/null", 10);
+        let mut engine = Engine::new(mock_config(), logger);
+        let (command_tx, _command_rx) = mpsc::channel(10);
+
+        engine.pending_proposal = Some(PendingProposal {
+            quote: ProposalQuote {
+                id: "p1".to_string(),
+                ask_price: 1.0,
+            },
+            probability_up: 0.6,
+            received_at: Instant::now() - Duration::from_secs(61),
+        });
+        engine.fsm.transition(TradingState::Evaluating)?;
+        engine.fsm.transition(TradingState::OrderPending)?;
+
+        // Tick should discard stale proposal
+        engine.handle_event(
+            WebSocketEvent::Tick(TickEvent {
+                epoch: 1,
+                quote: 100.0,
+            }),
+            &command_tx,
+        )?;
+        assert_eq!(engine.fsm.state(), TradingState::Idle);
+        assert!(engine.pending_proposal.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_api_error_recovery() -> Result<()> {
+        let logger = TickLogger::start("/dev/null", 10);
+        let mut engine = Engine::new(mock_config(), logger);
+        let (command_tx, _command_rx) = mpsc::channel(10);
+
+        engine.fsm.transition(TradingState::Evaluating)?;
+        engine.fsm.transition(TradingState::OrderPending)?;
+        engine.pending_proposal = Some(PendingProposal {
+            quote: ProposalQuote {
+                id: "p1".to_string(),
+                ask_price: 1.0,
+            },
+            probability_up: 0.6,
+            received_at: Instant::now(),
+        });
+
+        // API error should reset FSM and clear proposal
+        engine.handle_event(
+            WebSocketEvent::ApiError(ApiErrorEvent {
+                code: Some("RateLimit".to_string()),
+                message: Some("Too many requests".to_string()),
+                raw: "{}".to_string(),
+            }),
+            &command_tx,
+        )?;
+
+        assert_eq!(engine.fsm.state(), TradingState::Idle);
+        assert!(engine.pending_proposal.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_latency_based_skipping() -> Result<()> {
+        let logger = TickLogger::start("/dev/null", 10);
+        let mut config = mock_config();
+        config.max_tick_latency = Duration::from_millis(5); // Aggressive latency limit
+        let mut engine = Engine::new(config, logger);
+        let (command_tx, mut command_rx) = mpsc::channel(10);
+
+        // We need to ensure we have enough ticks to generate a signal
+        // ConstantModel returns 0.6, threshold is 0.55
+        // TickProcessor needs 2 ticks for streak
+        engine.handle_event(
+            WebSocketEvent::Tick(TickEvent {
+                epoch: 1,
+                quote: 100.0,
+            }),
+            &command_tx,
+        )?;
+
+        // Wait a bit to simulate latency before the next tick
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        engine.handle_event(
+            WebSocketEvent::Tick(TickEvent {
+                epoch: 2,
+                quote: 101.0,
+            }),
+            &command_tx,
+        )?;
+
+        // State should remain Idle because latency was exceeded
+        assert_eq!(engine.fsm.state(), TradingState::Idle);
+
+        // Command receiver should be empty
+        assert!(command_rx.try_recv().is_err());
+
+        Ok(())
+    }
+}
+use crate::{
+    fsm::TradingState,
+    tick_processor::{Direction, TickSnapshot},
+};
+
+pub trait ProbabilityModel {
+    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ConstantModel;
+
+impl ProbabilityModel for ConstantModel {
+    fn probability_up(&self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+        0.6
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GaussianModel {
+    pub duration_ticks: u32,
+}
+
+impl ProbabilityModel for GaussianModel {
+    fn probability_up(&self, tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+        use statrs::distribution::{ContinuousCDF, Normal};
+
+        if tick.volatility <= 0.0 {
+            return 0.5;
+        }
+
+        let t_sqrt = (self.duration_ticks as f64).sqrt();
+        let x = (tick.drift * t_sqrt) / tick.volatility;
+
+        let n = Normal::new(0.0, 1.0).unwrap();
+        n.cdf(x)
+    }
+}
+
+pub enum AnyModel {
+    Constant(ConstantModel),
+    Gaussian(GaussianModel),
+    Transformer(crate::transformer::TransformerModel),
+}
+
+impl ProbabilityModel for AnyModel {
+    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
+        match self {
+            Self::Constant(m) => m.probability_up(tick, history),
+            Self::Gaussian(m) => m.probability_up(tick, history),
+            Self::Transformer(m) => m.probability_up(tick, history),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalDirection {
+    Up,
+    Down,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StrategyDecision {
+    pub probability_up: f64,
+    pub signal: Option<SignalDirection>,
+}
+
+pub struct StrategyEngine<M> {
+    threshold: f64,
+    model: M,
+}
+
+impl<M> StrategyEngine<M>
+where
+    M: ProbabilityModel,
+{
+    pub fn new(threshold: f64, model: M) -> Self {
+        Self { threshold, model }
+    }
+
+    pub fn evaluate(
+        &self,
+        tick: &TickSnapshot,
+        history: &[TickSnapshot],
+        state: TradingState,
+    ) -> StrategyDecision {
+        if state != TradingState::Evaluating || tick.streak < 2 {
+            return StrategyDecision {
+                probability_up: 0.5,
+                signal: None,
+            };
+        }
+
+        let probability_up = self.model.probability_up(tick, history);
+        let probability_down = 1.0 - probability_up;
+        let signal = match tick.direction {
+            Direction::Up if probability_up >= self.threshold => Some(SignalDirection::Up),
+            Direction::Down if probability_down >= self.threshold => Some(SignalDirection::Down),
+            _ => None,
+        };
+
+        StrategyDecision {
+            probability_up,
+            signal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tick_processor::{Direction, TickSnapshot};
+
+    #[test]
+    fn emits_signal_only_when_threshold_and_streak_match() {
+        let snapshot = TickSnapshot {
+            epoch: 2,
+            price: 101.0,
+            direction: Direction::Up,
+            streak: 2,
+            volatility: 0.5,
+            drift: 0.1,
+            ..Default::default()
+        };
+
+        let strategy = StrategyEngine::new(0.55, ConstantModel);
+        let decision = strategy.evaluate(&snapshot, &[], TradingState::Evaluating);
+
+        assert_eq!(decision.probability_up, 0.6);
+        assert_eq!(decision.signal, Some(SignalDirection::Up));
+    }
+
+    #[test]
+    fn gaussian_model_increases_probability_with_drift() {
+        let model = GaussianModel { duration_ticks: 5 };
+        
+        let snapshot_low_drift = TickSnapshot {
+            epoch: 1,
+            price: 100.0,
+            direction: Direction::Up,
+            streak: 1,
+            volatility: 1.0,
+            drift: 0.1,
+            ..Default::default()
+        };
+
+        let snapshot_high_drift = TickSnapshot {
+            epoch: 2,
+            price: 101.0,
+            direction: Direction::Up,
+            streak: 2,
+            volatility: 1.0,
+            drift: 0.5,
+            ..Default::default()
+        };
+
+        let prob_low = model.probability_up(&snapshot_low_drift, &[]);
+        let prob_high = model.probability_up(&snapshot_high_drift, &[]);
+
+        assert!(prob_low > 0.5);
+        assert!(prob_high > prob_low);
+    }
+}
+use anyhow::{anyhow, Result};
+use std::path::Path;
+use tract_onnx::prelude::*;
+
+use crate::strategy::ProbabilityModel;
+use crate::tick_processor::TickSnapshot;
+
+pub struct TransformerModel {
+    model: RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
+    sequence_length: usize,
+}
+
+impl TransformerModel {
+    pub fn load(path: impl AsRef<Path>, sequence_length: usize) -> Result<Self> {
+        let model = tract_onnx::onnx()
+            .model_for_path(path)?
+            .with_input_fact(0, f32::fact(&[1, sequence_length, 5]).into())?
+            .into_optimized()?
+            .into_runnable()?;
+
+        Ok(Self {
+            model,
+            sequence_length,
+        })
+    }
+
+    pub fn predict(&self, history: &[TickSnapshot]) -> Result<f64> {
+        if history.len() < self.sequence_length {
+            return Err(anyhow!("insufficient history for transformer inference"));
+        }
+
+        let start_idx = history.len() - self.sequence_length;
+        let sequence = &history[start_idx..];
+
+        let mut data = Vec::with_capacity(self.sequence_length * 5);
+        for tick in sequence {
+            data.push(tick.direction.as_i8() as f32);
+            data.push(tick.return_magnitude as f32);
+            data.push(tick.streak as f32);
+            data.push(tick.ticks_since_reversal as f32);
+            data.push(tick.volatility as f32);
+        }
+
+        let input = tract_ndarray::Array3::from_shape_vec((1, self.sequence_length, 5), data)
+            .map_err(|err| anyhow!("failed to build input tensor: {err}"))?;
+        
+        let result = self.model.run(tvec!(input.into_tensor().into()))?;
+        let output = result[0].to_array_view::<f32>()?;
+        
+        // Assume output is a single float representing P(Up)
+        Ok(output[0] as f64)
+    }
+}
+
+// Since ProbabilityModel trait only takes a single TickSnapshot, we need to adapt it.
+// Or we need to change the trait to take history.
+// However, the current strategy boundary says "Strategy consumes normalized tick state".
+// Let's stick to the trait and maybe the model itself tracks the history?
+// Or we pass the processor to the evaluator?
+// Actually, TickProcessor already has the history in its ring buffer.
+
+impl ProbabilityModel for TransformerModel {
+    fn probability_up(&self, _tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
+        self.predict(history).unwrap_or(0.5)
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Direction {
+    Up,
+    Down,
+    #[default]
+    Flat,
+}
+
+impl Direction {
+    pub fn as_i8(self) -> i8 {
+        match self {
+            Self::Up => 1,
+            Self::Down => -1,
+            Self::Flat => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TickSnapshot {
+    pub epoch: u64,
+    pub price: f64,
+    pub direction: Direction,
+    pub streak: u32,
+    pub volatility: f64,
+    pub drift: f64,
+    pub return_magnitude: f64,
+    pub ticks_since_reversal: u32,
+}
+
+#[derive(Debug)]
+pub struct TickProcessor {
+    ring: [TickSnapshot; Self::CAPACITY],
+    next_index: usize,
+    len: usize,
+    last_price: Option<f64>,
+    last_trend_direction: Direction,
+    last_direction: Direction,
+    last_streak: u32,
+    ticks_since_reversal: u32,
+}
+
+impl TickProcessor {
+    pub const CAPACITY: usize = 64;
+
+    pub fn new() -> Self {
+        Self {
+            ring: [TickSnapshot::default(); Self::CAPACITY],
+            next_index: 0,
+            len: 0,
+            last_price: None,
+            last_trend_direction: Direction::Flat,
+            last_direction: Direction::Flat,
+            last_streak: 0,
+            ticks_since_reversal: 0,
+        }
+    }
+
+    pub fn push(&mut self, epoch: u64, price: f64) -> TickSnapshot {
+        let direction = match self.last_price {
+            Some(previous) if price > previous => Direction::Up,
+            Some(previous) if price < previous => Direction::Down,
+            Some(_) => Direction::Flat,
+            None => Direction::Flat,
+        };
+
+        let streak = if matches!(direction, Direction::Flat) {
+            0
+        } else if direction == self.last_direction {
+            self.last_streak + 1
+        } else {
+            1
+        };
+
+        let return_magnitude = match self.last_price {
+            Some(prev) => (price - prev).abs(),
+            None => 0.0,
+        };
+
+        // Reversal is defined as a flip between Up and Down, even if Flat is in between.
+        if (direction == Direction::Up && self.last_trend_direction == Direction::Down)
+            || (direction == Direction::Down && self.last_trend_direction == Direction::Up)
+        {
+            self.ticks_since_reversal = 1;
+        } else if direction != Direction::Flat {
+            self.ticks_since_reversal += 1;
+        }
+
+        if direction != Direction::Flat {
+            self.last_trend_direction = direction;
+        }
+
+        let snapshot_without_stats = TickSnapshot {
+            epoch,
+            price,
+            direction,
+            streak,
+            volatility: 0.0,
+            drift: 0.0,
+            return_magnitude,
+            ticks_since_reversal: self.ticks_since_reversal,
+        };
+
+        self.ring[self.next_index] = snapshot_without_stats;
+        self.next_index = (self.next_index + 1) % Self::CAPACITY;
+        self.len = self.len.saturating_add(1).min(Self::CAPACITY);
+        self.last_price = Some(price);
+        self.last_direction = direction;
+        self.last_streak = streak;
+
+        // Calculate volatility and drift over the available history
+        let (volatility, drift) = self.calculate_stats();
+
+        let mut snapshot = snapshot_without_stats;
+        snapshot.volatility = volatility;
+        snapshot.drift = drift;
+
+        // Update the ring buffer entry with the calculated stats
+        let last_index = (self.next_index + Self::CAPACITY - 1) % Self::CAPACITY;
+        self.ring[last_index] = snapshot;
+
+        snapshot
+    }
+
+    fn calculate_stats(&self) -> (f64, f64) {
+        if self.len < 2 {
+            return (0.0, 0.0);
+        }
+
+        let mut returns = Vec::with_capacity(self.len - 1);
+        for i in 0..self.len - 1 {
+            let curr_idx = (self.next_index + Self::CAPACITY - self.len + i) % Self::CAPACITY;
+            let next_idx = (curr_idx + 1) % Self::CAPACITY;
+            let curr_price = self.ring[curr_idx].price;
+            let next_price = self.ring[next_idx].price;
+
+            if curr_price > 0.0 {
+                returns.push(next_price - curr_price); // Use absolute returns for simplicity in tick-based systems
+            }
+        }
+
+        if returns.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let sum: f64 = returns.iter().sum();
+        let mean = sum / returns.len() as f64;
+
+        let sq_diff_sum: f64 = returns.iter().map(|r| (r - mean).powi(2)).sum();
+        let variance = sq_diff_sum / returns.len() as f64;
+        let std_dev = variance.sqrt();
+
+        (std_dev, mean)
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn last_n_snapshots(&self, n: usize) -> Vec<TickSnapshot> {
+        let count = n.min(self.len);
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            let idx = (self.next_index + Self::CAPACITY - count + i) % Self::CAPACITY;
+            result.push(self.ring[idx]);
+        }
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn computes_direction_and_streak_without_growth() {
+        let mut processor = TickProcessor::new();
+
+        let first = processor.push(1, 100.0);
+        let second = processor.push(2, 101.0);
+        let third = processor.push(3, 102.0);
+        let fourth = processor.push(4, 101.0);
+
+        assert_eq!(first.direction.as_i8(), 0);
+        assert_eq!(second.direction.as_i8(), 1);
+        assert_eq!(second.streak, 1);
+        assert_eq!(third.streak, 2);
+        assert_eq!(fourth.direction.as_i8(), -1);
+        assert_eq!(fourth.streak, 1);
+
+        for index in 0..128 {
+            processor.push(index, index as f64);
+        }
+        assert_eq!(processor.len(), TickProcessor::CAPACITY);
+    }
+
+    #[test]
+    fn tracks_magnitude_and_reversal_timing() {
+        let mut processor = TickProcessor::new();
+
+        // 1. Initial tick
+        let s1 = processor.push(1, 100.0);
+        assert_eq!(s1.return_magnitude, 0.0);
+        assert_eq!(s1.ticks_since_reversal, 0);
+
+        // 2. Trend starts (Up)
+        let s2 = processor.push(2, 101.0);
+        assert_eq!(s2.return_magnitude, 1.0);
+        assert_eq!(s2.ticks_since_reversal, 1);
+
+        // 3. Trend continues (Up)
+        let s3 = processor.push(3, 103.0);
+        assert_eq!(s3.return_magnitude, 2.0);
+        assert_eq!(s3.ticks_since_reversal, 2);
+
+        // 4. Flat (should NOT reset reversal)
+        let s4 = processor.push(4, 103.0);
+        assert_eq!(s4.return_magnitude, 0.0);
+        assert_eq!(s4.ticks_since_reversal, 2); // Still 2 from the last active direction
+
+        // 5. Reversal (Down)
+        let s5 = processor.push(5, 102.0);
+        assert_eq!(s5.return_magnitude, 1.0);
+        assert_eq!(s5.ticks_since_reversal, 1); // Reset!
+
+        // 6. Trend continues (Down)
+        let s6 = processor.push(6, 101.0);
+        assert_eq!(s6.ticks_since_reversal, 2);
+    }
+}
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use anyhow::{anyhow, Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::{debug, error, info, warn};
+use url::Url;
+
+use crate::{config::AppConfig, execution::ProposalSpec};
+
+// Step 0 audit summary:
+// - WebSocket loop already uses a single persistent connection with reconnect.
+// - Existing message handling classified all non-error frames as ticks, risking state desync.
+// - `tx.send(...).await` in the read loop can block tick processing under backpressure.
+// - No per-message routing for tick/trade/system frames, which obscures downstream FSM control.
+// Step 1 fix focus:
+// - Keep single-connection lifecycle and reconnect semantics.
+// - Add deterministic message routing (tick/trade/error/other).
+// - Use non-blocking channel sends in the hot read loop.
+
+#[derive(Debug)]
+pub struct DerivWebSocketClient {
+    cfg: AppConfig,
+    req_id_counter: AtomicU32,
+}
+
+#[derive(Debug)]
+pub enum WebSocketEvent {
+    Tick(TickEvent),
+    TradeUpdate(TradeUpdate),
+    ApiError(ApiErrorEvent),
+    Status(ConnectionStatus),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectionStatus {
+    Connecting,
+    Connected,
+    Authorized,
+    SubscribedTicks,
+    Disconnected,
+}
+
+#[derive(Debug)]
+pub struct TickEvent {
+    pub epoch: u64,
+    pub quote: f64,
+}
+
+#[derive(Debug)]
+pub struct ApiErrorEvent {
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub raw: String,
+}
+
+#[derive(Debug)]
+pub enum TradeUpdate {
+    Authorized {
+        login_id: String,
+        currency: String,
+    },
+    Proposal {
+        id: String,
+        ask_price: f64,
+        probability_up: f64,
+    },
+    BuyAccepted {
+        contract_id: u64,
+        buy_price: f64,
+    },
+    OpenContract(OpenContractUpdate),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenContractUpdate {
+    pub contract_id: u64,
+    pub is_sold: Option<bool>,
+    pub profit: Option<f64>,
+}
+
+#[derive(Debug)]
+pub enum WebSocketCommand {
+    RequestProposal { proposal: ProposalSpec },
+    Buy { proposal_id: String, price: f64 },
+    SubscribeOpenContract { contract_id: u64 },
+    ClearTrackedContract { contract_id: u64 },
+}
+
+#[derive(Serialize)]
+struct AuthorizeRequest<'a> {
+    authorize: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct TicksRequest<'a> {
+    ticks: &'a str,
+    subscribe: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct ProposalRequest<'a> {
+    proposal: u8,
+    amount: f64,
+    basis: &'static str,
+    contract_type: &'a str,
+    currency: &'a str,
+    duration: u32,
+    duration_unit: &'static str,
+    symbol: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct BuyRequest<'a> {
+    buy: &'a str,
+    price: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct ProposalOpenContractRequest {
+    proposal_open_contract: u8,
+    contract_id: u64,
+    subscribe: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Envelope {
+    msg_type: Option<String>,
+    req_id: Option<u32>,
+    error: Option<ApiErrorPayload>,
+    tick: Option<TickPayload>,
+    proposal: Option<ProposalPayload>,
+    buy: Option<BuyPayload>,
+    proposal_open_contract: Option<OpenContractUpdate>,
+    authorize: Option<AuthorizePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiErrorPayload {
+    code: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TickPayload {
+    epoch: u64,
+    quote: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProposalPayload {
+    id: String,
+    ask_price: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuyPayload {
+    contract_id: u64,
+    buy_price: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorizePayload {
+    loginid: String,
+    currency: String,
+}
+
+impl DerivWebSocketClient {
+    pub fn new(cfg: AppConfig) -> Self {
+        Self {
+            cfg,
+            req_id_counter: AtomicU32::new(1),
+        }
+    }
+
+    fn next_req_id(&self) -> u32 {
+        self.req_id_counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub async fn run(
+        self,
+        event_tx: mpsc::Sender<WebSocketEvent>,
+        mut command_rx: mpsc::Receiver<WebSocketCommand>,
+    ) -> Result<()> {
+        let ws_url = self.ws_url()?;
+        let mut tracked_contracts = BTreeSet::new();
+
+        loop {
+            try_emit(
+                &event_tx,
+                WebSocketEvent::Status(ConnectionStatus::Connecting),
+            )?;
+            info!(url = %ws_url, "connecting to Deriv websocket");
+
+            match connect_async(ws_url.as_str()).await {
+                Ok((stream, _)) => {
+                    try_emit(
+                        &event_tx,
+                        WebSocketEvent::Status(ConnectionStatus::Connected),
+                    )?;
+                    info!("connected to Deriv websocket");
+
+                    let (mut write, mut read) = stream.split();
+                    self.send_json(
+                        &mut write,
+                        &AuthorizeRequest {
+                            authorize: &self.cfg.token,
+                            req_id: Some(self.next_req_id()),
+                        },
+                    )
+                    .await
+                    .context("failed to authorize websocket session")?;
+
+                    self.send_json(
+                        &mut write,
+                        &TicksRequest {
+                            ticks: &self.cfg.symbol,
+                            subscribe: 1,
+                            req_id: Some(self.next_req_id()),
+                        },
+                    )
+                    .await
+                    .context("failed to subscribe to ticks")?;
+                    try_emit(
+                        &event_tx,
+                        WebSocketEvent::Status(ConnectionStatus::SubscribedTicks),
+                    )?;
+
+                    for contract_id in tracked_contracts.iter().copied() {
+                        self.send_json(
+                            &mut write,
+                            &ProposalOpenContractRequest {
+                                proposal_open_contract: 1,
+                                contract_id,
+                                subscribe: 1,
+                                req_id: Some(self.next_req_id()),
+                            },
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to resubscribe open contract {contract_id}")
+                        })?;
+                    }
+
+                    loop {
+                        tokio::select! {
+                            maybe_command = command_rx.recv() => {
+                                let Some(command) = maybe_command else {
+                                    return Ok(());
+                                };
+
+                                match command {
+                                    WebSocketCommand::RequestProposal { proposal } => {
+                                        let request = ProposalRequest {
+                                            proposal: 1,
+                                            amount: proposal.amount,
+                                            basis: "stake",
+                                            contract_type: &proposal.contract_type,
+                                            currency: &proposal.currency,
+                                            duration: proposal.duration_ticks,
+                                            duration_unit: "t",
+                                            symbol: &proposal.symbol,
+                                            req_id: Some(self.next_req_id()),
+                                        };
+                                        self.send_json(&mut write, &request).await?;
+                                    }
+                                    WebSocketCommand::Buy { proposal_id, price } => {
+                                        self.send_json(&mut write, &BuyRequest {
+                                            buy: &proposal_id,
+                                            price,
+                                            req_id: Some(self.next_req_id()),
+                                        }).await?;
+                                    }
+                                    WebSocketCommand::SubscribeOpenContract { contract_id } => {
+                                        tracked_contracts.insert(contract_id);
+                                        self.send_json(&mut write, &ProposalOpenContractRequest {
+                                            proposal_open_contract: 1,
+                                            contract_id,
+                                            subscribe: 1,
+                                            req_id: Some(self.next_req_id()),
+                                        }).await?;
+                                    }
+                                    WebSocketCommand::ClearTrackedContract { contract_id } => {
+                                        tracked_contracts.remove(&contract_id);
+                                    }
+                                }
+                            }
+                            frame = read.next() => {
+                                match frame {
+                                    Some(Ok(Message::Text(text))) => {
+                                        self.route_message(&event_tx, &text).await?;
+                                    }
+                                    Some(Ok(Message::Ping(payload))) => {
+                                        debug!(size = payload.len(), "received ping");
+                                    }
+                                    Some(Ok(Message::Pong(payload))) => {
+                                        debug!(size = payload.len(), "received pong");
+                                    }
+                                    Some(Ok(Message::Close(frame))) => {
+                                        warn!(?frame, "server closed websocket");
+                                        break;
+                                    }
+                                    Some(Ok(Message::Binary(_))) => {
+                                        debug!("ignoring binary frame");
+                                    }
+                                    Some(Ok(_)) => {}
+                                    Some(Err(err)) => {
+                                        error!(error = %err, "websocket read failed");
+                                        break;
+                                    }
+                                    None => {
+                                        warn!("websocket stream ended");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!(error = %err, "connection failed");
+                }
+            }
+
+            try_emit(
+                &event_tx,
+                WebSocketEvent::Status(ConnectionStatus::Disconnected),
+            )?;
+            tokio::time::sleep(self.cfg.reconnect_backoff).await;
+        }
+    }
+
+    async fn route_message(
+        &self,
+        event_tx: &mpsc::Sender<WebSocketEvent>,
+        raw: &str,
+    ) -> Result<()> {
+        let envelope: Envelope = serde_json::from_str(raw).context("failed to decode message")?;
+        let req_id = envelope.req_id;
+
+        if let Some(error) = envelope.error {
+            error!(?req_id, code = ?error.code, message = ?error.message, "api error received");
+            return try_emit(
+                event_tx,
+                WebSocketEvent::ApiError(ApiErrorEvent {
+                    code: error.code,
+                    message: error.message,
+                    raw: raw.to_string(),
+                }),
+            );
+        }
+
+        match envelope.msg_type.as_deref() {
+            Some("authorize") => {
+                if let Some(authorize) = envelope.authorize {
+                    debug!(?req_id, "received authorization response");
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::Authorized {
+                            login_id: authorize.loginid,
+                            currency: authorize.currency,
+                        }),
+                    )?;
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::Status(ConnectionStatus::Authorized),
+                    )?;
+                }
+            }
+            Some("tick") => {
+                if let Some(tick) = envelope.tick {
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::Tick(TickEvent {
+                            epoch: tick.epoch,
+                            quote: tick.quote,
+                        }),
+                    )?;
+                }
+            }
+            Some("proposal") => {
+                if let Some(proposal) = envelope.proposal {
+                    debug!(?req_id, proposal_id = %proposal.id, "received proposal");
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::Proposal {
+                            id: proposal.id,
+                            ask_price: proposal.ask_price,
+                            probability_up: 0.6,
+                        }),
+                    )?;
+                }
+            }
+            Some("buy") => {
+                if let Some(buy) = envelope.buy {
+                    info!(?req_id, contract_id = %buy.contract_id, "received buy acceptance");
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::BuyAccepted {
+                            contract_id: buy.contract_id,
+                            buy_price: buy.buy_price,
+                        }),
+                    )?;
+                }
+            }
+            Some("proposal_open_contract") => {
+                if let Some(update) = envelope.proposal_open_contract {
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::OpenContract(update)),
+                    )?;
+                }
+            }
+            Some(other) => {
+                debug!(msg_type = %other, "ignoring unsupported message type");
+            }
+            None => {
+                debug!("message missing msg_type");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_json<T>(
+        &self,
+        write: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        message: &T,
+    ) -> Result<()>
+    where
+        T: Serialize,
+    {
+        let payload =
+            serde_json::to_string(message).context("failed to serialize websocket message")?;
+        write
+            .send(Message::Text(payload))
+            .await
+            .context("failed to send websocket message")
+    }
+
+    fn ws_url(&self) -> Result<Url> {
+        let mut url =
+            Url::parse(&self.cfg.websocket_endpoint).context("invalid websocket endpoint")?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("app_id", &self.cfg.app_id.to_string());
+        }
+        Ok(url)
+    }
+}
+
+fn try_emit(event_tx: &mpsc::Sender<WebSocketEvent>, event: WebSocketEvent) -> Result<()> {
+    match event_tx.try_send(event) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!("websocket event channel full; dropping event");
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(anyhow!("websocket event channel closed")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DerivEnvelope {
+    msg_type: Option<String>,
+    error: Option<ApiErrorPayload>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dispatch {
+    Delivered,
+    ReceiverClosed,
+    Backpressure,
+}
+import torch
+import torch.nn as nn
+import torch.onnx
+
+class SimpleTransformer(nn.Module):
+    def __init__(self, input_dim=5, d_model=16, nhead=2, num_layers=2):
+        super(SimpleTransformer, self).__init__()
+        self.embedding = nn.Linear(input_dim, d_model)
+        encoder_layers = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+        self.fc = nn.Linear(d_model, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # x shape: (batch, seq_len, input_dim)
+        x = self.embedding(x)
+        x = self.transformer_encoder(x)
+        # Use the last sequence element
+        x = x[:, -1, :]
+        x = self.fc(x)
+        return self.sigmoid(x)
+
+import sqlite3
+import numpy as np
+
+def load_real_data(db_path, limit=100000):
+    print(f"Loading data from {db_path}...")
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT quote FROM ticks ORDER BY epoch ASC LIMIT ?", (limit,))
+    rows = cursor.fetchall()
+    conn.close()
+    return np.array([r[0] for r in rows], dtype=np.float32)
+
+def prepare_features(prices, seq_len=16):
+    print("Preparing features...")
+    # Simple feature extraction mirroring Rust code
+    # Features: Direction, Return Magnitude, Streak, Ticks since reversal, Volatility
+    
+    returns = np.diff(prices)
+    directions = np.sign(returns)
+    magnitudes = np.abs(returns)
+    
+    # Simple streak and reversal calculation
+    streaks = []
+    reversals = []
+    curr_streak = 0
+    curr_reversal = 0
+    last_dir = 0
+    
+    for d in directions:
+        if d == last_dir:
+            curr_streak += 1
+            curr_reversal += 1
+        else:
+            curr_streak = 1
+            curr_reversal = 1
+            last_dir = d
+        streaks.append(curr_streak)
+        reversals.append(curr_reversal)
+        
+    # Volatility (rolling std of returns)
+    vol = []
+    for i in range(len(returns)):
+        start = max(0, i - 19)
+        vol.append(np.std(returns[start:i+1]))
+        
+    # Combine into (N, 5)
+    # Note: returns has len N-1, so we lose the first price
+    features = np.stack([directions, magnitudes, streaks, reversals, vol], axis=1)
+    
+    # Create sequences
+    x, y = [], []
+    for i in range(len(features) - seq_len):
+        x.append(features[i:i+seq_len])
+        # Target: 1 if next return is positive
+        y.append(1.0 if returns[i+seq_len] > 0 else 0.0)
+        
+    return torch.from_numpy(np.array(x, dtype=np.float32)), torch.from_numpy(np.array(y, dtype=np.float32)).unsqueeze(1)
+
+def train_and_export():
+    db_path = "data/tick_store.db"
+    seq_len = 16
+    input_dim = 5
+    
+    try:
+        prices = load_real_data(db_path, limit=5000)
+        x_train, y_train = prepare_features(prices, seq_len)
+    except Exception as e:
+        print(f"Failed to load real data: {e}. Using dummy data instead.")
+        x_train = torch.randn(64, seq_len, input_dim)
+        y_train = torch.rand(64, 1)
+
+    # Device detection
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    model = SimpleTransformer(input_dim=input_dim).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.BCELoss()
+    
+    print(f"Training on {len(x_train)} samples...")
+    batch_size = 64
+    for epoch in range(5):
+        epoch_loss = 0
+        for i in range(0, len(x_train), batch_size):
+            batch_x = x_train[i:i+batch_size].to(device)
+            batch_y = y_train[i:i+batch_size].to(device)
+            
+            optimizer.zero_grad()
+            output = model(batch_x)
+            loss = criterion(output, batch_y)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            
+        print(f"Epoch {epoch}, Loss: {epoch_loss / (len(x_train)/batch_size):.4f}")
+            
+    # Export to ONNX
+    dummy_input = torch.randn(1, seq_len, input_dim)
+    dummy_input = torch.randn(1, seq_len, input_dim).to(device)
+    onnx_path = "model.onnx"
+    
+    print(f"Exporting to {onnx_path}...")
+    # We use a script-friendly export if possible, but let's try the direct way again
+    # with a smaller model if needed.
+    torch.onnx.export(
+        model,
+        dummy_input,
+        onnx_path,
+        export_params=True,
+        opset_version=11,
+        do_constant_folding=True,
+        input_names=['input'],
+        output_names=['output'],
+        training=torch.onnx.TrainingMode.EVAL
+    )
+    print("Done.")
+
+if __name__ == "__main__":
+    train_and_export()
