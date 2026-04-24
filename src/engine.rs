@@ -61,6 +61,9 @@ struct Engine {
     proposal_timeout: Duration,
     order_pending_timeout: Duration,
     tick_logger: TickLogger,
+    pending_req_id: Option<u32>,
+    pending_probability: Option<f64>,
+    req_id_counter: u32,
 }
 
 impl Engine {
@@ -103,7 +106,16 @@ impl Engine {
             proposal_timeout: Duration::from_secs(60),
             order_pending_timeout: Duration::from_secs(10),
             tick_logger,
+            pending_req_id: None,
+            pending_probability: None,
+            req_id_counter: 100, // Start high to avoid overlap with client defaults
         }
+    }
+
+    fn next_req_id(&mut self) -> u32 {
+        let id = self.req_id_counter;
+        self.req_id_counter += 1;
+        id
     }
 
     fn handle_event(
@@ -188,11 +200,13 @@ impl Engine {
                         return Ok(());
                     }
 
+                    let req_id = self.next_req_id();
                     if let Err(reason) = try_send_buy(
                         &mut self.execution,
                         command_tx,
                         &ready.quote,
                         tick_started_at,
+                        req_id,
                     ) {
                         warn!(?reason, "buy skipped");
                         let probability_up = ready.probability_up;
@@ -207,6 +221,8 @@ impl Engine {
                         );
                         return Ok(());
                     }
+
+                    self.pending_req_id = Some(req_id);
 
                     self.fsm.transition(TradingState::OrderPending)?;
                     self.order_sent_at = Some(tick_started_at);
@@ -232,11 +248,13 @@ impl Engine {
                     };
                     let proposal_spec = self.execution.build_proposal(signal, &proposal_spec);
 
+                    let req_id = self.next_req_id();
                     if let Err(reason) = try_send_proposal(
                         &mut self.execution,
                         command_tx,
                         proposal_spec,
                         tick_started_at,
+                        req_id,
                     ) {
                         warn!(?reason, "proposal skipped");
                         self.fsm.transition(TradingState::Idle)?;
@@ -249,6 +267,8 @@ impl Engine {
                         );
                         return Ok(());
                     }
+
+                    self.pending_req_id = Some(req_id);
 
                     self.fsm.transition(TradingState::OrderPending)?;
                     self.order_sent_at = Some(tick_started_at);
@@ -277,13 +297,22 @@ impl Engine {
                 TradeUpdate::Proposal {
                     id,
                     ask_price,
-                    probability_up,
+                    req_id,
                 } => {
+                    if req_id != self.pending_req_id {
+                        warn!(?req_id, expected = ?self.pending_req_id, "ignoring stale/mismatched proposal");
+                        return Ok(());
+                    }
+
+                    let probability_up = self.pending_probability.unwrap_or(0.5);
                     self.pending_proposal = Some(PendingProposal {
                         quote: ProposalQuote { id, ask_price },
                         probability_up,
                         received_at: Instant::now(),
                     });
+                    self.pending_req_id = None;
+                    self.pending_probability = None;
+
                     if self.fsm.state() != TradingState::OrderPending {
                         safe_reset(&mut self.fsm);
                         self.fsm.transition(TradingState::OrderPending)?;
@@ -292,13 +321,25 @@ impl Engine {
                 TradeUpdate::BuyAccepted {
                     contract_id,
                     buy_price,
+                    req_id,
                 } => {
+                    if req_id != self.pending_req_id {
+                        warn!(?req_id, expected = ?self.pending_req_id, "ignoring stale/mismatched buy confirmation");
+                        return Ok(());
+                    }
+
                     self.active_contract_id = Some(contract_id);
                     self.pending_proposal = None;
                     self.order_sent_at = None;
+                    self.pending_req_id = None;
+                    self.pending_probability = None;
+
                     self.fsm.transition(TradingState::InPosition)?;
                     if command_tx
-                        .try_send(WebSocketCommand::SubscribeOpenContract { contract_id })
+                        .try_send(WebSocketCommand::SubscribeOpenContract { 
+                            contract_id,
+                            req_id: self.next_req_id(),
+                        })
                         .is_err()
                     {
                         error!("failed to queue open contract subscription");
@@ -347,7 +388,12 @@ impl Engine {
                 ConnectionStatus::Authorized => info!("authorized"),
                 ConnectionStatus::SubscribedTicks => info!("tick subscription active"),
                 ConnectionStatus::Disconnected => {
-                    warn!("websocket disconnected");
+                    warn!("websocket disconnected; clearing pending state");
+                    safe_reset(&mut self.fsm);
+                    self.pending_proposal = None;
+                    self.order_sent_at = None;
+                    self.pending_req_id = None;
+                    self.pending_probability = None;
                 }
             },
         }
@@ -360,10 +406,11 @@ fn try_send_proposal(
     command_tx: &mpsc::Sender<WebSocketCommand>,
     proposal: ProposalSpec,
     now: Instant,
+    req_id: u32,
 ) -> Result<(), crate::execution::ExecutionSkipReason> {
     execution.permit_api_call(now)?;
     command_tx
-        .try_send(WebSocketCommand::RequestProposal { proposal })
+        .try_send(WebSocketCommand::RequestProposal { proposal, req_id })
         .map_err(|_| crate::execution::ExecutionSkipReason::ApiPerTickLimit)?;
     Ok(())
 }
@@ -373,12 +420,14 @@ fn try_send_buy(
     command_tx: &mpsc::Sender<WebSocketCommand>,
     quote: &ProposalQuote,
     now: Instant,
+    req_id: u32,
 ) -> Result<(), crate::execution::ExecutionSkipReason> {
     execution.permit_api_call(now)?;
     command_tx
         .try_send(WebSocketCommand::Buy {
             proposal_id: quote.id.clone(),
             price: quote.ask_price,
+            req_id,
         })
         .map_err(|_| crate::execution::ExecutionSkipReason::ApiPerTickLimit)?;
     Ok(())
