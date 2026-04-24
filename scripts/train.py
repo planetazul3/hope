@@ -91,7 +91,11 @@ def train_and_export():
         x_train = torch.randn(64, seq_len, input_dim)
         y_train = torch.rand(64, 1)
 
-    model = SimpleTransformer(input_dim=input_dim)
+    # Device detection
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    model = SimpleTransformer(input_dim=input_dim).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = nn.BCELoss()
     
@@ -100,8 +104,8 @@ def train_and_export():
     for epoch in range(5):
         epoch_loss = 0
         for i in range(0, len(x_train), batch_size):
-            batch_x = x_train[i:i+batch_size]
-            batch_y = y_train[i:i+batch_size]
+            batch_x = x_train[i:i+batch_size].to(device)
+            batch_y = y_train[i:i+batch_size].to(device)
             
             optimizer.zero_grad()
             output = model(batch_x)
