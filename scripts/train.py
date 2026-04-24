@@ -79,7 +79,7 @@ def prepare_features(prices, seq_len=16):
     return torch.from_numpy(np.array(x, dtype=np.float32)), torch.from_numpy(np.array(y, dtype=np.float32)).unsqueeze(1)
 
 def train_and_export():
-    db_path = "/home/planetazul3/dev/LLM-Asset-Manager/data/tick_store.db"
+    db_path = "data/tick_store.db"
     seq_len = 16
     input_dim = 5
     
