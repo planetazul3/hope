@@ -1,12 +1,14 @@
-use std::time::Duration;
+use std::collections::BTreeSet;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 use url::Url;
+
+use crate::{config::AppConfig, execution::ProposalSpec};
 
 // Step 0 audit summary:
 // - WebSocket loop already uses a single persistent connection with reconnect.
@@ -19,232 +21,438 @@ use url::Url;
 // - Use non-blocking channel sends in the hot read loop.
 
 #[derive(Debug, Clone)]
-pub struct WebSocketClientConfig {
-    pub endpoint: String,
-    pub app_id: u32,
-    pub symbol: String,
-    pub reconnect_backoff: Duration,
-}
-
-impl Default for WebSocketClientConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: "wss://ws.derivws.com/websockets/v3".to_string(),
-            app_id: 1089,
-            symbol: "R_100".to_string(),
-            reconnect_backoff: Duration::from_secs(1),
-        }
-    }
+pub struct DerivWebSocketClient {
+    cfg: AppConfig,
 }
 
 #[derive(Debug)]
 pub enum WebSocketEvent {
-    Tick {
-        raw: String,
-    },
-    Trade {
-        msg_type: String,
-        raw: String,
-    },
-    Other {
-        msg_type: Option<String>,
-        raw: String,
-    },
-    ApiError {
-        code: Option<String>,
-        message: Option<String>,
-        raw: String,
-    },
-    Status(WebSocketStatus),
+    Tick(TickEvent),
+    TradeUpdate(TradeUpdate),
+    ApiError(ApiErrorEvent),
+    Status(ConnectionStatus),
 }
 
-#[derive(Debug)]
-pub enum WebSocketStatus {
+#[derive(Debug, Clone, Copy)]
+pub enum ConnectionStatus {
     Connecting,
     Connected,
-    Subscribed,
+    Authorized,
+    SubscribedTicks,
     Disconnected,
 }
 
 #[derive(Debug)]
-pub struct DerivWebSocketClient {
-    cfg: WebSocketClientConfig,
+pub struct TickEvent {
+    pub epoch: u64,
+    pub quote: f64,
+}
+
+#[derive(Debug)]
+pub struct ApiErrorEvent {
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub raw: String,
+}
+
+#[derive(Debug)]
+pub enum TradeUpdate {
+    Authorized {
+        login_id: String,
+        currency: String,
+    },
+    Proposal {
+        id: String,
+        ask_price: f64,
+        probability_up: f64,
+    },
+    BuyAccepted {
+        contract_id: u64,
+        buy_price: f64,
+    },
+    OpenContract(OpenContractUpdate),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OpenContractUpdate {
+    pub contract_id: u64,
+    pub is_sold: Option<bool>,
+    pub profit: Option<f64>,
+}
+
+#[derive(Debug)]
+pub enum WebSocketCommand {
+    RequestProposal { proposal: ProposalSpec },
+    Buy { proposal_id: String, price: f64 },
+    SubscribeOpenContract { contract_id: u64 },
+    ClearTrackedContract { contract_id: u64 },
 }
 
 #[derive(Serialize)]
-struct TickSubscriptionRequest<'a> {
+struct AuthorizeRequest<'a> {
+    authorize: &'a str,
+}
+
+#[derive(Serialize)]
+struct TicksRequest<'a> {
     ticks: &'a str,
     subscribe: u8,
 }
 
-#[derive(Debug, Deserialize)]
-struct DerivEnvelope {
-    error: Option<DerivError>,
-    msg_type: Option<String>,
+#[derive(Serialize)]
+struct ProposalRequest<'a> {
+    proposal: u8,
+    amount: f64,
+    basis: &'static str,
+    contract_type: &'a str,
+    currency: &'a str,
+    duration: u32,
+    duration_unit: &'static str,
+    symbol: &'a str,
+}
+
+#[derive(Serialize)]
+struct BuyRequest<'a> {
+    buy: &'a str,
+    price: f64,
+}
+
+#[derive(Serialize)]
+struct ProposalOpenContractRequest {
+    proposal_open_contract: u8,
+    contract_id: u64,
+    subscribe: u8,
 }
 
 #[derive(Debug, Deserialize)]
-struct DerivError {
+struct Envelope {
+    msg_type: Option<String>,
+    error: Option<ApiErrorPayload>,
+    tick: Option<TickPayload>,
+    proposal: Option<ProposalPayload>,
+    buy: Option<BuyPayload>,
+    proposal_open_contract: Option<OpenContractUpdate>,
+    authorize: Option<AuthorizePayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiErrorPayload {
     code: Option<String>,
     message: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TickPayload {
+    epoch: u64,
+    quote: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProposalPayload {
+    id: String,
+    ask_price: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuyPayload {
+    contract_id: u64,
+    buy_price: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthorizePayload {
+    loginid: String,
+    currency: String,
+}
+
 impl DerivWebSocketClient {
-    pub fn new(cfg: WebSocketClientConfig) -> Self {
+    pub fn new(cfg: AppConfig) -> Self {
         Self { cfg }
     }
 
-    pub async fn run(self, tx: mpsc::Sender<WebSocketEvent>) -> Result<()> {
+    pub async fn run(
+        self,
+        event_tx: mpsc::Sender<WebSocketEvent>,
+        mut command_rx: mpsc::Receiver<WebSocketCommand>,
+    ) -> Result<()> {
         let ws_url = self.ws_url()?;
+        let mut tracked_contracts = BTreeSet::new();
 
         loop {
-            Self::send_status(&tx, WebSocketStatus::Connecting).await;
-            info!(url = %ws_url, "connecting to Deriv WebSocket");
+            try_emit(
+                &event_tx,
+                WebSocketEvent::Status(ConnectionStatus::Connecting),
+            )?;
+            info!(url = %ws_url, "connecting to Deriv websocket");
 
             match connect_async(ws_url.as_str()).await {
-                Ok((stream, _response)) => {
-                    Self::send_status(&tx, WebSocketStatus::Connected).await;
-                    info!("connected to Deriv WebSocket");
+                Ok((stream, _)) => {
+                    try_emit(
+                        &event_tx,
+                        WebSocketEvent::Status(ConnectionStatus::Connected),
+                    )?;
+                    info!("connected to Deriv websocket");
+
                     let (mut write, mut read) = stream.split();
+                    self.send_json(
+                        &mut write,
+                        &AuthorizeRequest {
+                            authorize: &self.cfg.token,
+                        },
+                    )
+                    .await
+                    .context("failed to authorize websocket session")?;
 
-                    let subscribe = TickSubscriptionRequest {
-                        ticks: &self.cfg.symbol,
-                        subscribe: 1,
-                    };
-                    let payload = serde_json::to_string(&subscribe)
-                        .context("failed to encode tick subscription request")?;
+                    self.send_json(
+                        &mut write,
+                        &TicksRequest {
+                            ticks: &self.cfg.symbol,
+                            subscribe: 1,
+                        },
+                    )
+                    .await
+                    .context("failed to subscribe to ticks")?;
+                    try_emit(
+                        &event_tx,
+                        WebSocketEvent::Status(ConnectionStatus::SubscribedTicks),
+                    )?;
 
-                    if let Err(err) = write.send(Message::Text(payload)).await {
-                        error!(error = %err, "failed to send tick subscription");
-                        Self::send_status(&tx, WebSocketStatus::Disconnected).await;
-                        tokio::time::sleep(self.cfg.reconnect_backoff).await;
-                        continue;
+                    for contract_id in tracked_contracts.iter().copied() {
+                        self.send_json(
+                            &mut write,
+                            &ProposalOpenContractRequest {
+                                proposal_open_contract: 1,
+                                contract_id,
+                                subscribe: 1,
+                            },
+                        )
+                        .await
+                        .with_context(|| {
+                            format!("failed to resubscribe open contract {contract_id}")
+                        })?;
                     }
 
-                    Self::send_status(&tx, WebSocketStatus::Subscribed).await;
-                    info!(symbol = %self.cfg.symbol, "subscribed to tick stream");
+                    loop {
+                        tokio::select! {
+                            maybe_command = command_rx.recv() => {
+                                let Some(command) = maybe_command else {
+                                    return Ok(());
+                                };
 
-                    while let Some(frame) = read.next().await {
-                        match frame {
-                            Ok(Message::Text(text)) => {
-                                if let Some(error_event) = Self::to_api_error_event(&text) {
-                                    warn!("received API error frame");
-                                    match Self::send_event_nonblocking(&tx, error_event) {
-                                        Dispatch::Delivered => {}
-                                        Dispatch::ReceiverClosed => {
-                                            warn!("receiver dropped; stopping websocket client");
-                                            return Ok(());
-                                        }
-                                        Dispatch::Backpressure => {
-                                            warn!("channel backpressure on API error event; reconnecting");
-                                            break;
-                                        }
+                                match command {
+                                    WebSocketCommand::RequestProposal { proposal } => {
+                                        let request = ProposalRequest {
+                                            proposal: 1,
+                                            amount: proposal.amount,
+                                            basis: "stake",
+                                            contract_type: &proposal.contract_type,
+                                            currency: &proposal.currency,
+                                            duration: proposal.duration_ticks,
+                                            duration_unit: "t",
+                                            symbol: &proposal.symbol,
+                                        };
+                                        self.send_json(&mut write, &request).await?;
                                     }
-                                } else {
-                                    let routed_event = Self::route_message(text);
-                                    match Self::send_event_nonblocking(&tx, routed_event) {
-                                        Dispatch::Delivered => {}
-                                        Dispatch::ReceiverClosed => {
-                                            warn!("receiver dropped; stopping websocket client");
-                                            return Ok(());
-                                        }
-                                        Dispatch::Backpressure => {
-                                            warn!("channel backpressure on routed event; reconnecting");
-                                            break;
-                                        }
+                                    WebSocketCommand::Buy { proposal_id, price } => {
+                                        self.send_json(&mut write, &BuyRequest {
+                                            buy: &proposal_id,
+                                            price,
+                                        }).await?;
+                                    }
+                                    WebSocketCommand::SubscribeOpenContract { contract_id } => {
+                                        tracked_contracts.insert(contract_id);
+                                        self.send_json(&mut write, &ProposalOpenContractRequest {
+                                            proposal_open_contract: 1,
+                                            contract_id,
+                                            subscribe: 1,
+                                        }).await?;
+                                    }
+                                    WebSocketCommand::ClearTrackedContract { contract_id } => {
+                                        tracked_contracts.remove(&contract_id);
                                     }
                                 }
                             }
-                            Ok(Message::Ping(payload)) => {
-                                debug!(size = payload.len(), "received ping");
+                            frame = read.next() => {
+                                match frame {
+                                    Some(Ok(Message::Text(text))) => {
+                                        self.route_message(&event_tx, &text).await?;
+                                    }
+                                    Some(Ok(Message::Ping(payload))) => {
+                                        debug!(size = payload.len(), "received ping");
+                                    }
+                                    Some(Ok(Message::Pong(payload))) => {
+                                        debug!(size = payload.len(), "received pong");
+                                    }
+                                    Some(Ok(Message::Close(frame))) => {
+                                        warn!(?frame, "server closed websocket");
+                                        break;
+                                    }
+                                    Some(Ok(Message::Binary(_))) => {
+                                        debug!("ignoring binary frame");
+                                    }
+                                    Some(Ok(_)) => {}
+                                    Some(Err(err)) => {
+                                        error!(error = %err, "websocket read failed");
+                                        break;
+                                    }
+                                    None => {
+                                        warn!("websocket stream ended");
+                                        break;
+                                    }
+                                }
                             }
-                            Ok(Message::Pong(payload)) => {
-                                debug!(size = payload.len(), "received pong");
-                            }
-                            Ok(Message::Binary(_)) => {
-                                debug!("ignoring binary frame");
-                            }
-                            Ok(Message::Close(frame)) => {
-                                warn!(?frame, "socket closed by server");
-                                break;
-                            }
-                            Err(err) => {
-                                error!(error = %err, "socket read error; reconnecting");
-                                break;
-                            }
-                            _ => {}
                         }
                     }
                 }
                 Err(err) => {
-                    error!(error = %err, "connection failed; will reconnect");
+                    error!(error = %err, "connection failed");
                 }
             }
 
-            Self::send_status(&tx, WebSocketStatus::Disconnected).await;
+            try_emit(
+                &event_tx,
+                WebSocketEvent::Status(ConnectionStatus::Disconnected),
+            )?;
             tokio::time::sleep(self.cfg.reconnect_backoff).await;
         }
     }
 
+    async fn route_message(
+        &self,
+        event_tx: &mpsc::Sender<WebSocketEvent>,
+        raw: &str,
+    ) -> Result<()> {
+        let envelope: Envelope = serde_json::from_str(raw).context("failed to decode message")?;
+
+        if let Some(error) = envelope.error {
+            return try_emit(
+                event_tx,
+                WebSocketEvent::ApiError(ApiErrorEvent {
+                    code: error.code,
+                    message: error.message,
+                    raw: raw.to_string(),
+                }),
+            );
+        }
+
+        match envelope.msg_type.as_deref() {
+            Some("authorize") => {
+                if let Some(authorize) = envelope.authorize {
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::Authorized {
+                            login_id: authorize.loginid,
+                            currency: authorize.currency,
+                        }),
+                    )?;
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::Status(ConnectionStatus::Authorized),
+                    )?;
+                }
+            }
+            Some("tick") => {
+                if let Some(tick) = envelope.tick {
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::Tick(TickEvent {
+                            epoch: tick.epoch,
+                            quote: tick.quote,
+                        }),
+                    )?;
+                }
+            }
+            Some("proposal") => {
+                if let Some(proposal) = envelope.proposal {
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::Proposal {
+                            id: proposal.id,
+                            ask_price: proposal.ask_price,
+                            probability_up: 0.6,
+                        }),
+                    )?;
+                }
+            }
+            Some("buy") => {
+                if let Some(buy) = envelope.buy {
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::BuyAccepted {
+                            contract_id: buy.contract_id,
+                            buy_price: buy.buy_price,
+                        }),
+                    )?;
+                }
+            }
+            Some("proposal_open_contract") => {
+                if let Some(update) = envelope.proposal_open_contract {
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::OpenContract(update)),
+                    )?;
+                }
+            }
+            Some(other) => {
+                debug!(msg_type = %other, "ignoring unsupported message type");
+            }
+            None => {
+                debug!("message missing msg_type");
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn send_json<T>(
+        &self,
+        write: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        message: &T,
+    ) -> Result<()>
+    where
+        T: Serialize,
+    {
+        let payload =
+            serde_json::to_string(message).context("failed to serialize websocket message")?;
+        write
+            .send(Message::Text(payload))
+            .await
+            .context("failed to send websocket message")
+    }
+
     fn ws_url(&self) -> Result<Url> {
-        let mut url = Url::parse(&self.cfg.endpoint).context("invalid websocket endpoint")?;
+        let mut url =
+            Url::parse(&self.cfg.websocket_endpoint).context("invalid websocket endpoint")?;
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("app_id", &self.cfg.app_id.to_string());
         }
         Ok(url)
     }
+}
 
-    fn to_api_error_event(raw: &str) -> Option<WebSocketEvent> {
-        let parsed = serde_json::from_str::<DerivEnvelope>(raw).ok()?;
-        let err = parsed.error?;
-
-        Some(WebSocketEvent::ApiError {
-            code: err.code,
-            message: err.message,
-            raw: raw.to_string(),
-        })
-    }
-
-    fn route_message(raw: String) -> WebSocketEvent {
-        let msg_type = serde_json::from_str::<DerivEnvelope>(&raw)
-            .ok()
-            .and_then(|envelope| envelope.msg_type);
-
-        match msg_type {
-            Some(msg_type) if msg_type == "tick" => WebSocketEvent::Tick { raw },
-            Some(msg_type) if Self::is_trade_message(&msg_type) => {
-                WebSocketEvent::Trade { msg_type, raw }
-            }
-            _ => WebSocketEvent::Other { msg_type, raw },
+fn try_emit(event_tx: &mpsc::Sender<WebSocketEvent>, event: WebSocketEvent) -> Result<()> {
+    match event_tx.try_send(event) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!("websocket event channel full; dropping event");
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(anyhow!("websocket event channel closed"))
         }
     }
+}
 
-    fn is_trade_message(msg_type: &str) -> bool {
-        matches!(
-            msg_type,
-            "buy" | "proposal_open_contract" | "sell" | "transaction"
-        )
-    }
-
-    fn send_event_nonblocking(
-        tx: &mpsc::Sender<WebSocketEvent>,
-        event: WebSocketEvent,
-    ) -> Dispatch {
-        match tx.try_send(event) {
-            Ok(()) => Dispatch::Delivered,
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Dispatch::ReceiverClosed,
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Dispatch::Backpressure,
-        }
-    }
-
-    async fn send_status(tx: &mpsc::Sender<WebSocketEvent>, status: WebSocketStatus) {
-        if let Dispatch::Backpressure =
-            Self::send_event_nonblocking(tx, WebSocketEvent::Status(status))
-        {
-            warn!("status event dropped due to channel backpressure");
-        }
-    }
+#[derive(Debug, Deserialize)]
+struct DerivEnvelope {
+    msg_type: Option<String>,
+    error: Option<ApiErrorPayload>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
