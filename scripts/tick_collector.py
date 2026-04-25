@@ -2,11 +2,8 @@ import asyncio
 import sqlite3
 import json
 import argparse
-import os
 import sys
 import time
-import signal
-from pathlib import Path
 
 try:
     import websockets

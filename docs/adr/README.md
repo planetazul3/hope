@@ -18,3 +18,4 @@ This directory stores Architecture Decision Records (ADRs) for `hope`.
 - [0005 - Stay on Legacy Deriv WebSocket API Until Explicitly Replaced](./0005-stay-on-legacy-deriv-websocket-api-until-explicitly-replaced.md)
 - [0006 - Gaussian Probability Model](./0006-gaussian-probability-model.md)
 - [0007 - Neural Inference Integration](./0007-neural-inference-integration.md)
+- [0008 - ML Training Pipeline Optimizations](./0008-ml-training-pipeline-optimizations.md)

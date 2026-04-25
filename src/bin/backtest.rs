@@ -1,27 +1,52 @@
+use hope::config::AppConfig;
 use hope::fsm::TradingState;
-use hope::strategy::{AnyModel, GaussianModel, SignalDirection, StrategyEngine};
+use hope::strategy::{AnyModel, GaussianModel, StrategyEngine};
 use hope::tick_processor::{TickProcessor, TickSnapshot};
+use hope::transformer::TransformerModel;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 fn main() {
+    let config = AppConfig::load().expect("failed to load configuration");
+
     let csv_path = "data/ticks.csv";
     let file = File::open(csv_path).expect("failed to open ticks.csv");
     let reader = BufReader::new(file);
 
     let mut processor = TickProcessor::new();
-    let model = AnyModel::Gaussian(GaussianModel { duration_ticks: 1 });
-    let strategy = StrategyEngine::new(0.55, model, 5); // threshold 0.55
+
+    // Task 5: Dynamic model instantiation based on config
+    let model = match config.model_type {
+        hope::config::ModelType::Gaussian => AnyModel::Gaussian(GaussianModel {
+            duration_ticks: config.duration_ticks,
+        }),
+        hope::config::ModelType::Transformer => {
+            let model_path = config
+                .transformer_model_path
+                .as_deref()
+                .unwrap_or("model.onnx");
+            AnyModel::Transformer(Box::new(
+                TransformerModel::load(model_path, config.transformer_sequence_length)
+                    .expect("failed to load transformer model"),
+            ))
+        }
+    };
+
+    let strategy = StrategyEngine::new(
+        config.probability_threshold,
+        model,
+        config.min_trend_length,
+    );
 
     let mut total_trades = 0;
     let mut wins = 0;
     let mut losses = 0;
     let mut total_profit = 0.0;
 
-    let mut in_position: Option<(SignalDirection, f64, u64)> = None; // direction, entry_price, entry_epoch
-    let stake = 1.0;
+    let stake = config.stake;
     let payout_ratio = 0.95;
 
+    let mut in_position: Option<(hope::strategy::SignalDirection, f64, u64)> = None;
     let mut history_buffer = [TickSnapshot::default(); 64];
 
     for line in reader.lines() {
@@ -34,9 +59,8 @@ fn main() {
         let epoch: u64 = parts[0].parse().unwrap_or(0);
         let quote: f64 = parts[1].parse().unwrap_or(0.0);
 
-        // 1. If in position, check result
         if let Some((dir, entry_price, _)) = in_position {
-            let profit = if dir == SignalDirection::Up {
+            let profit = if dir == hope::strategy::SignalDirection::Up {
                 if quote > entry_price {
                     stake * payout_ratio
                 } else {
@@ -59,16 +83,13 @@ fn main() {
             total_profit += profit;
 
             in_position = None;
-            // After trade, we don't evaluate signal on the same tick to simulate cooldown/settlement
-            // In Deriv, "1 tick" means it settles on the next tick.
             continue;
         }
 
-        // 2. Update processor
         let snapshot = processor.push(epoch, quote);
 
-        // 3. Evaluate strategy
-        let count = processor.last_n_into(16, &mut history_buffer);
+        // Task 6: Use dynamically loaded transformer_sequence_length
+        let count = processor.last_n_into(config.transformer_sequence_length, &mut history_buffer);
         let history = &history_buffer[..count];
         let decision = strategy.evaluate(&snapshot, history, TradingState::Idle);
 
@@ -84,6 +105,8 @@ fn main() {
     };
 
     println!("--- Backtest Results ---");
+    println!("Model:        {:?}", config.model_type);
+    println!("Threshold:    {:.4}", config.probability_threshold);
     println!("Total Trades: {}", total_trades);
     println!("Wins:         {}", wins);
     println!("Losses:       {}", losses);

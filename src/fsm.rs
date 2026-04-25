@@ -13,6 +13,12 @@ pub struct TradingFsm {
     state: TradingState,
 }
 
+impl Default for TradingFsm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TradingFsm {
     pub fn new() -> Self {
         Self {

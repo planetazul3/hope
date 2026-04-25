@@ -42,6 +42,12 @@ pub struct TickProcessor {
     return_sq_sum: f64,
 }
 
+impl Default for TickProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TickProcessor {
     pub const CAPACITY: usize = 64;
     /// Window size for volatility and drift calculation.
