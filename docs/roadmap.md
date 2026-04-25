@@ -61,6 +61,7 @@ Status: `Done`
 
 - Implement structured logging (`training.log`) for full training traceability
 - Standardize cross-platform notebook execution (Google Colab / Kaggle / Local)
-- Implement configurable model pooling (`mean` vs `last`) for architecture flexibility
+- Implement configurable model pooling (`mean` vs `last` vs `cls`) for architecture flexibility
 - Add post-export ONNX validation and integrity checks
 - Enhance UX with real-time `tqdm` progress visualization and hardware auditing
+- Implement Transformer robustness: [CLS] token, Kaiming initialization, and Z-score standardization

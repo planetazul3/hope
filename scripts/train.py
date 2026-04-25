@@ -18,8 +18,11 @@ class SimpleTransformer(nn.Module):
         self.embedding = nn.Linear(input_dim, d_model)
         self.pooling = pooling
         
-        pe = torch.zeros(max_seq_len, d_model)
-        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        # [CLS] token for classification
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        
+        pe = torch.zeros(max_seq_len + 1, d_model)
+        position = torch.arange(0, max_seq_len + 1, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -37,10 +40,25 @@ class SimpleTransformer(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
         self.fc = nn.Linear(d_model, 1)
         self.sigmoid = nn.Sigmoid()
+        
+        # Explicit initialization
+        self._init_weights()
+
+    def _init_weights(self):
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.kaiming_normal_(p)
+        nn.init.normal_(self.cls_token, std=0.02)
 
     def forward(self, x, mask=None):
+        batch_size, seq_len, _ = x.size()
         x = self.input_norm(x)
         x = self.embedding(x)
+        
+        # Add [CLS] token
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        
         x = x + self.pe[:, :x.size(1), :]
         x = self.dropout(x)
         
@@ -50,8 +68,10 @@ class SimpleTransformer(nn.Module):
         
         x = self.transformer_encoder(x, mask=mask)
         
-        if self.pooling == 'mean':
-            x = torch.mean(x, dim=1)
+        if self.pooling == 'cls':
+            x = x[:, 0, :]
+        elif self.pooling == 'mean':
+            x = torch.mean(x[:, 1:, :], dim=1)
         else:
             x = x[:, -1, :]
         
@@ -105,6 +125,11 @@ def prepare_features(prices, seq_len=32):
     norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
         
     features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol], axis=1)
+    
+    # Task: Z-score Standardization
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    features = scaler.fit_transform(features)
     
     x, y = [], []
     for i in range(len(features) - seq_len):
@@ -187,7 +212,18 @@ def train_and_export():
     patience_counter = 0
 
     logger.info(f"Training V2 (CSV-based) on {len(x_train)} samples...")
+    
+    warmup_epochs = 5
+    base_lr = 0.001
+    
     for epoch in range(100):
+        # Linear Warmup
+        if epoch < warmup_epochs:
+            lr = base_lr * (epoch + 1) / warmup_epochs
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+            logger.info(f"Warmup Phase: Epoch {epoch}, LR: {lr:.6f}")
+            
         model.train()
         train_loss = 0
         

@@ -17,9 +17,15 @@ We have implemented a suite of observability and portability enhancements:
 4.  **Hardware Auditing**: The training entrypoint now explicitly logs PyTorch versions, CUDA availability, and the specific GPU device name to ensure hardware acceleration is correctly utilized.
 5.  **Interactive Progress Visualization**: Integrated `tqdm` progress bars for both training and validation loops, providing real-time feedback on batch loss and estimated completion time.
 6.  **ONNX Integrity Validation**: Added a mandatory post-export validation step using the `onnx` library to verify that the generated `model.onnx` file is valid and compliant with the ONNX specification before deployment.
+7.  **Classification [CLS] Token**: Adopted the standard Transformer classification pattern by prepending a learned `[CLS]` token to the input sequence. This token serves as the primary aggregator for classification features, replacing simple sequence averaging.
+8.  **Explicit Weight Initialization**: Implemented Kaiming Normal initialization for linear layers and controlled standard deviation for the `[CLS]` token to ensure stable gradient flow from the start of training.
+9.  **Z-Score Feature Standardization**: Transitioned to `StandardScaler` for all input features to ensure zero mean and unit variance, optimizing the sensitivity of the dot-product attention mechanism.
+10. **Learning Rate Warmup**: Integrated a 5-epoch linear warmup schedule to prevent early divergence and allow attention layers to stabilize before reaching the base learning rate.
 
 ## Consequences
 
+*   **Convergence Stability**: The combination of warmup, explicit initialization, and standardization significantly reduces the risk of the model collapsing into predicting a single class (the "majority class" problem).
+*   **Feature Signal**: The `[CLS]` token improves the model's ability to focus on critical temporal patterns across the entire sequence.
 *   **Traceability**: Every training session now produces a durable audit trail in `training.log`.
 *   **Efficiency**: Researchers can move between cloud environments (Colab/Kaggle) and local workstations without modifying code or manually searching for data files.
 *   **Flexibility**: The model can be easily adapted to different time-series aggregation strategies by simply changing a configuration parameter.
