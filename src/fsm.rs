@@ -3,7 +3,6 @@ use anyhow::{anyhow, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TradingState {
     Idle,
-    Evaluating,
     OrderPending,
     InPosition,
     Cooldown,
@@ -26,21 +25,20 @@ impl TradingFsm {
     }
 
     pub fn transition(&mut self, next: TradingState) -> Result<()> {
+        if self.state == next {
+            return Ok(());
+        }
+
         let valid = matches!(
             (self.state, next),
-            (TradingState::Idle, TradingState::Evaluating)
+            (TradingState::Idle, TradingState::OrderPending)
                 | (TradingState::Idle, TradingState::Cooldown)
-                | (TradingState::Evaluating, TradingState::Idle)
-                | (TradingState::Evaluating, TradingState::OrderPending)
-                | (TradingState::Evaluating, TradingState::Cooldown)
-                | (TradingState::OrderPending, TradingState::Evaluating)
                 | (TradingState::OrderPending, TradingState::InPosition)
                 | (TradingState::OrderPending, TradingState::Idle)
                 | (TradingState::OrderPending, TradingState::Cooldown)
                 | (TradingState::InPosition, TradingState::Idle)
                 | (TradingState::InPosition, TradingState::Cooldown)
                 | (TradingState::Cooldown, TradingState::Idle)
-                | (TradingState::Cooldown, TradingState::Evaluating)
         );
 
         if !valid {
@@ -76,7 +74,6 @@ mod tests {
     fn accepts_happy_path() {
         let mut fsm = TradingFsm::new();
 
-        fsm.transition(TradingState::Evaluating).unwrap();
         fsm.transition(TradingState::OrderPending).unwrap();
         fsm.transition(TradingState::InPosition).unwrap();
         fsm.transition(TradingState::Idle).unwrap();

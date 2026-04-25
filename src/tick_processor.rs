@@ -38,10 +38,15 @@ pub struct TickProcessor {
     last_direction: Direction,
     last_streak: u32,
     ticks_since_reversal: u32,
+    return_sum: f64,
+    return_sq_sum: f64,
 }
 
 impl TickProcessor {
     pub const CAPACITY: usize = 64;
+    /// Window size for volatility and drift calculation.
+    /// ADR 0006 specifies this horizon for short-term responsive trend detection.
+    pub const VOLATILITY_WINDOW: usize = 10;
 
     pub fn new() -> Self {
         Self {
@@ -53,6 +58,8 @@ impl TickProcessor {
             last_direction: Direction::Flat,
             last_streak: 0,
             ticks_since_reversal: 0,
+            return_sum: 0.0,
+            return_sq_sum: 0.0,
         }
     }
 
@@ -72,8 +79,8 @@ impl TickProcessor {
             1
         };
 
-        let return_magnitude = match self.last_price {
-            Some(prev) => (price - prev).abs(),
+        let current_return = match self.last_price {
+            Some(prev) => price - prev,
             None => 0.0,
         };
 
@@ -90,6 +97,21 @@ impl TickProcessor {
             self.last_trend_direction = direction;
         }
 
+        // Maintain running sums for O(1) mean and variance calculation.
+        // If the buffer is full relative to the VOLATILITY_WINDOW, subtract the return
+        // that is about to be evicted from the horizon.
+        if self.len >= Self::VOLATILITY_WINDOW {
+            let expired_idx =
+                (self.next_index + Self::CAPACITY - Self::VOLATILITY_WINDOW) % Self::CAPACITY;
+            let expired_next_idx = (expired_idx + 1) % Self::CAPACITY;
+            let expired_return = self.ring[expired_next_idx].price - self.ring[expired_idx].price;
+            self.return_sum -= expired_return;
+            self.return_sq_sum -= expired_return.powi(2);
+        }
+
+        self.return_sum += current_return;
+        self.return_sq_sum += current_return.powi(2);
+
         let snapshot_without_stats = TickSnapshot {
             epoch,
             price,
@@ -97,7 +119,7 @@ impl TickProcessor {
             streak,
             volatility: 0.0,
             drift: 0.0,
-            return_magnitude,
+            return_magnitude: current_return.abs(),
             ticks_since_reversal: self.ticks_since_reversal,
         };
 
@@ -123,32 +145,15 @@ impl TickProcessor {
     }
 
     fn calculate_stats(&self) -> (f64, f64) {
-        if self.len < 2 {
+        let count = self.len.min(Self::VOLATILITY_WINDOW);
+        if count < 2 {
             return (0.0, 0.0);
         }
 
-        let mut returns = Vec::with_capacity(self.len - 1);
-        for i in 0..self.len - 1 {
-            let curr_idx = (self.next_index + Self::CAPACITY - self.len + i) % Self::CAPACITY;
-            let next_idx = (curr_idx + 1) % Self::CAPACITY;
-            let curr_price = self.ring[curr_idx].price;
-            let next_price = self.ring[next_idx].price;
-
-            if curr_price > 0.0 {
-                returns.push(next_price - curr_price); // Use absolute returns for simplicity in tick-based systems
-            }
-        }
-
-        if returns.is_empty() {
-            return (0.0, 0.0);
-        }
-
-        let sum: f64 = returns.iter().sum();
-        let mean = sum / returns.len() as f64;
-
-        let sq_diff_sum: f64 = returns.iter().map(|r| (r - mean).powi(2)).sum();
-        let variance = sq_diff_sum / returns.len() as f64;
-        let std_dev = variance.sqrt();
+        let n = (count - 1) as f64;
+        let mean = self.return_sum / n;
+        let variance = (self.return_sq_sum / n) - mean.powi(2);
+        let std_dev = variance.max(0.0).sqrt();
 
         (std_dev, mean)
     }
@@ -158,14 +163,13 @@ impl TickProcessor {
         self.len
     }
 
-    pub fn last_n_snapshots(&self, n: usize) -> Vec<TickSnapshot> {
-        let count = n.min(self.len);
-        let mut result = Vec::with_capacity(count);
-        for i in 0..count {
+    pub fn last_n_into(&self, n: usize, out: &mut [TickSnapshot]) -> usize {
+        let count = n.min(self.len).min(out.len());
+        for (i, item) in out.iter_mut().enumerate().take(count) {
             let idx = (self.next_index + Self::CAPACITY - count + i) % Self::CAPACITY;
-            result.push(self.ring[idx]);
+            *item = self.ring[idx];
         }
-        result
+        count
     }
 }
 

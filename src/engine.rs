@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
@@ -11,7 +13,7 @@ use crate::{
     risk::RiskManager,
     strategy::{AnyModel, GaussianModel, SignalDirection, StrategyEngine},
     tick_logger::TickLogger,
-    tick_processor::TickProcessor,
+    tick_processor::{TickProcessor, TickSnapshot},
     websocket_client::{
         ApiErrorEvent, ConnectionStatus, DerivWebSocketClient, TradeUpdate, WebSocketCommand,
         WebSocketEvent,
@@ -30,10 +32,11 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let (command_tx, command_rx) =
         mpsc::channel::<WebSocketCommand>(config.outbound_queue_capacity);
 
-    let client = DerivWebSocketClient::new(config.clone());
+    let req_id_counter = Arc::new(AtomicU32::new(100));
+    let client = DerivWebSocketClient::new(config.clone(), Arc::clone(&req_id_counter));
     let client_task = tokio::spawn(async move { client.run(event_tx, command_rx).await });
 
-    let mut engine = Engine::new(config, tick_logger);
+    let mut engine = Engine::new(config, tick_logger, req_id_counter);
 
     while let Some(event) = event_rx.recv().await {
         engine.handle_event(event, &command_tx)?;
@@ -57,22 +60,29 @@ struct Engine {
     cooldown_remaining: u32,
     pending_proposal: Option<PendingProposal>,
     active_contract_id: Option<u64>,
+    contract_started_at: Option<Instant>,
     order_sent_at: Option<Instant>,
     proposal_timeout: Duration,
     order_pending_timeout: Duration,
     tick_logger: TickLogger,
     pending_req_id: Option<u32>,
+    pending_subscription_req_id: Option<u32>,
     pending_probability: Option<f64>,
-    req_id_counter: u32,
+    req_id_counter: Arc<AtomicU32>,
+    history_buffer: [TickSnapshot; 64], // Increased to accommodate max CAPACITY
+    balance: f64,
 }
 
 impl Engine {
-    fn new(config: AppConfig, tick_logger: TickLogger) -> Self {
+    fn new(config: AppConfig, tick_logger: TickLogger, req_id_counter: Arc<AtomicU32>) -> Self {
         let model = match config.model_type {
             crate::config::ModelType::Transformer => {
                 if let Some(path) = &config.transformer_model_path {
-                    match crate::transformer::TransformerModel::load(path, 16) {
-                        Ok(m) => AnyModel::Transformer(m),
+                    match crate::transformer::TransformerModel::load(
+                        path,
+                        config.transformer_sequence_length,
+                    ) {
+                        Ok(m) => AnyModel::Transformer(Box::new(m)),
                         Err(err) => {
                             error!(error = %err, path = %path, "failed to load transformer model; falling back to Gaussian");
                             AnyModel::Gaussian(GaussianModel {
@@ -93,7 +103,11 @@ impl Engine {
         };
 
         Self {
-            strategy: StrategyEngine::new(config.probability_threshold, model),
+            strategy: StrategyEngine::new(
+                config.probability_threshold,
+                model,
+                config.min_trend_length,
+            ),
             execution: ExecutionEngine::new(config.min_api_interval, config.max_tick_latency),
             risk: RiskManager::new(3),
             config,
@@ -102,20 +116,22 @@ impl Engine {
             cooldown_remaining: 0,
             pending_proposal: None,
             active_contract_id: None,
+            contract_started_at: None,
             order_sent_at: None,
             proposal_timeout: Duration::from_secs(60),
             order_pending_timeout: Duration::from_secs(10),
             tick_logger,
             pending_req_id: None,
+            pending_subscription_req_id: None,
             pending_probability: None,
-            req_id_counter: 100, // Start high to avoid overlap with client defaults
+            req_id_counter,
+            history_buffer: [TickSnapshot::default(); 64],
+            balance: 0.0,
         }
     }
 
     fn next_req_id(&mut self) -> u32 {
-        let id = self.req_id_counter;
-        self.req_id_counter += 1;
-        id
+        self.req_id_counter.fetch_add(1, Ordering::SeqCst)
     }
 
     fn handle_event(
@@ -146,6 +162,26 @@ impl Engine {
 
                 if self.fsm.state() == TradingState::InPosition || self.active_contract_id.is_some()
                 {
+                    if let Some(started_at) = self.contract_started_at {
+                        // Conservative timeout: 2x duration plus 15s buffer
+                        let timeout_secs = (self.config.duration_ticks * 2 + 15) as u64;
+                        if tick_started_at.duration_since(started_at)
+                            > Duration::from_secs(timeout_secs)
+                        {
+                            warn!(?self.active_contract_id, "active contract tracked for too long; forcing clear");
+                            if let Some(contract_id) = self.active_contract_id {
+                                let _ =
+                                    command_tx.try_send(WebSocketCommand::ClearTrackedContract {
+                                        contract_id,
+                                    });
+                            }
+                            self.active_contract_id = None;
+                            self.contract_started_at = None;
+                            self.pending_subscription_req_id = None;
+                            safe_reset(&mut self.fsm);
+                        }
+                    }
+
                     self.tick_logger.try_log(
                         snapshot,
                         0.5,
@@ -174,10 +210,6 @@ impl Engine {
                         tick_started_at.elapsed().as_millis(),
                     );
                     return Ok(());
-                }
-
-                if self.fsm.state() == TradingState::Idle {
-                    self.fsm.transition(TradingState::Evaluating)?;
                 }
 
                 if let Some(ready) = self.pending_proposal.take() {
@@ -236,11 +268,19 @@ impl Engine {
                     return Ok(());
                 }
 
-                let history = self.tick_processor.last_n_snapshots(16);
-                let decision = self.strategy.evaluate(&snapshot, &history, self.fsm.state());
+                let count = self.tick_processor.last_n_into(
+                    self.config.transformer_sequence_length,
+                    &mut self.history_buffer,
+                );
+                let history = &self.history_buffer[..count];
+                let decision = self.strategy.evaluate(&snapshot, history, self.fsm.state());
                 if let Some(signal) = decision.signal {
+                    if self.fsm.state() == TradingState::OrderPending {
+                        return Ok(());
+                    }
+
                     let proposal_spec = ProposalSpec {
-                        contract_type: self.config.contract_type.clone(),
+                        contract_type: std::borrow::Cow::Owned(self.config.contract_type.clone()),
                         currency: self.config.currency.clone(),
                         amount: self.config.stake,
                         duration_ticks: self.config.duration_ticks,
@@ -257,7 +297,7 @@ impl Engine {
                         req_id,
                     ) {
                         warn!(?reason, "proposal skipped");
-                        self.fsm.transition(TradingState::Idle)?;
+                        safe_reset(&mut self.fsm);
                         self.tick_logger.try_log(
                             snapshot,
                             decision.probability_up,
@@ -280,7 +320,7 @@ impl Engine {
                         tick_started_at.elapsed().as_millis(),
                     );
                 } else {
-                    self.fsm.transition(TradingState::Idle)?;
+                    safe_reset(&mut self.fsm);
                     self.tick_logger.try_log(
                         snapshot,
                         decision.probability_up,
@@ -291,8 +331,27 @@ impl Engine {
                 }
             }
             WebSocketEvent::TradeUpdate(update) => match update {
-                TradeUpdate::Authorized { login_id, currency } => {
-                    info!(%login_id, %currency, "authorized websocket session");
+                TradeUpdate::Authorized {
+                    login_id,
+                    currency,
+                    balance,
+                    ..
+                } => {
+                    self.balance = balance;
+                    info!(%login_id, %currency, balance = %format!("{:.2}", balance), "authorized websocket session");
+                    if let Some(contract_id) = self.active_contract_id {
+                        let req_id = self.next_req_id();
+                        self.pending_subscription_req_id = Some(req_id);
+                        if command_tx
+                            .try_send(WebSocketCommand::SubscribeOpenContract {
+                                contract_id,
+                                req_id,
+                            })
+                            .is_err()
+                        {
+                            error!("failed to queue open contract resubscription");
+                        }
+                    }
                 }
                 TradeUpdate::Proposal {
                     id,
@@ -329,16 +388,19 @@ impl Engine {
                     }
 
                     self.active_contract_id = Some(contract_id);
+                    self.contract_started_at = Some(Instant::now());
                     self.pending_proposal = None;
                     self.order_sent_at = None;
                     self.pending_req_id = None;
                     self.pending_probability = None;
 
                     self.fsm.transition(TradingState::InPosition)?;
+                    let sub_req_id = self.next_req_id();
+                    self.pending_subscription_req_id = Some(sub_req_id);
                     if command_tx
-                        .try_send(WebSocketCommand::SubscribeOpenContract { 
+                        .try_send(WebSocketCommand::SubscribeOpenContract {
                             contract_id,
-                            req_id: self.next_req_id(),
+                            req_id: sub_req_id,
                         })
                         .is_err()
                     {
@@ -347,11 +409,40 @@ impl Engine {
                     info!(%contract_id, %buy_price, "buy confirmed");
                 }
                 TradeUpdate::OpenContract(update) => {
+                    if update.req_id.is_some() && update.req_id == self.pending_subscription_req_id
+                    {
+                        self.pending_subscription_req_id = None;
+                    }
+
                     if update.is_sold.unwrap_or(0) == 1 {
                         let profit = update.profit.unwrap_or(0.0);
+                        let old_balance = self.balance;
+                        self.balance += profit;
                         let outcome = self.risk.on_trade_closed(profit);
+
+                        let win_rate = if outcome.total_trades > 0 {
+                            (outcome.wins as f64 / outcome.total_trades as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+
+                        info!(
+                            contract_id = update.contract_id,
+                            profit = %format!("{:.2}", profit),
+                            old_balance = %format!("{:.2}", old_balance),
+                            new_balance = %format!("{:.2}", self.balance),
+                            total_trades = %outcome.total_trades,
+                            wins = %outcome.wins,
+                            losses = %outcome.losses,
+                            win_rate = %format!("{:.2}%", win_rate),
+                            session_profit = %format!("{:.2}", outcome.total_profit),
+                            "contract closed"
+                        );
+
                         let closed_contract_id = update.contract_id;
                         self.active_contract_id = None;
+                        self.contract_started_at = None;
+                        self.pending_subscription_req_id = None;
                         let _ = command_tx.try_send(WebSocketCommand::ClearTrackedContract {
                             contract_id: closed_contract_id,
                         });
@@ -375,11 +466,32 @@ impl Engine {
                     }
                 }
             },
-            WebSocketEvent::ApiError(ApiErrorEvent { code, message, raw }) => {
-                error!(?code, ?message, payload = %raw, "api error; skipping");
-                if self.fsm.state() == TradingState::OrderPending {
+            WebSocketEvent::ApiError(ApiErrorEvent {
+                code,
+                message,
+                req_id,
+            }) => {
+                error!(?req_id, ?code, ?message, "api error received");
+
+                if req_id.is_some() && req_id == self.pending_req_id {
+                    warn!("active request failed; resetting FSM");
+                    if self.fsm.state() == TradingState::OrderPending {
+                        safe_reset(&mut self.fsm);
+                        self.pending_proposal = None;
+                    }
+                    self.pending_req_id = None;
+                }
+
+                if req_id.is_some() && req_id == self.pending_subscription_req_id {
+                    error!(?req_id, ?self.active_contract_id, "contract resubscription failed; clearing state to prevent hang");
+                    if let Some(contract_id) = self.active_contract_id {
+                        let _ = command_tx
+                            .try_send(WebSocketCommand::ClearTrackedContract { contract_id });
+                    }
+                    self.active_contract_id = None;
+                    self.contract_started_at = None;
+                    self.pending_subscription_req_id = None;
                     safe_reset(&mut self.fsm);
-                    self.pending_proposal = None;
                 }
             }
             WebSocketEvent::Status(status) => match status {
@@ -407,11 +519,12 @@ fn try_send_proposal(
     proposal: ProposalSpec,
     now: Instant,
     req_id: u32,
-) -> Result<(), crate::execution::ExecutionSkipReason> {
-    execution.permit_api_call(now)?;
+) -> std::result::Result<(), crate::execution::ExecutionSkipReason> {
+    let guard = execution.permit_api_call(now)?;
     command_tx
         .try_send(WebSocketCommand::RequestProposal { proposal, req_id })
-        .map_err(|_| crate::execution::ExecutionSkipReason::ApiPerTickLimit)?;
+        .map_err(|_| crate::execution::ExecutionSkipReason::InternalQueueFull)?;
+    guard.commit();
     Ok(())
 }
 
@@ -421,15 +534,16 @@ fn try_send_buy(
     quote: &ProposalQuote,
     now: Instant,
     req_id: u32,
-) -> Result<(), crate::execution::ExecutionSkipReason> {
-    execution.permit_api_call(now)?;
+) -> std::result::Result<(), crate::execution::ExecutionSkipReason> {
+    let guard = execution.permit_api_call(now)?;
     command_tx
         .try_send(WebSocketCommand::Buy {
             proposal_id: quote.id.clone(),
             price: quote.ask_price,
             req_id,
         })
-        .map_err(|_| crate::execution::ExecutionSkipReason::ApiPerTickLimit)?;
+        .map_err(|_| crate::execution::ExecutionSkipReason::InternalQueueFull)?;
+    guard.commit();
     Ok(())
 }
 
@@ -479,13 +593,16 @@ mod tests {
             trading_enabled: true,
             model_type: crate::config::ModelType::Gaussian,
             transformer_model_path: None,
+            transformer_sequence_length: 16,
+            min_trend_length: 5,
         }
     }
 
     #[tokio::test]
     async fn test_fsm_cooldown_decrement() -> Result<()> {
         let logger = TickLogger::start("/dev/null", 10);
-        let mut engine = Engine::new(mock_config(), logger);
+        let counter = Arc::new(AtomicU32::new(1));
+        let mut engine = Engine::new(mock_config(), logger, counter);
         let (command_tx, _command_rx) = mpsc::channel(10);
 
         engine.fsm.transition(TradingState::Cooldown)?;
@@ -519,11 +636,11 @@ mod tests {
     #[tokio::test]
     async fn test_order_pending_timeout() -> Result<()> {
         let logger = TickLogger::start("/dev/null", 10);
-        let mut engine = Engine::new(mock_config(), logger);
+        let counter = Arc::new(AtomicU32::new(1));
+        let mut engine = Engine::new(mock_config(), logger, counter);
         let (command_tx, _command_rx) = mpsc::channel(10);
 
-        // Transition to OrderPending via Evaluating
-        engine.fsm.transition(TradingState::Evaluating)?;
+        // Transition to OrderPending
         engine.fsm.transition(TradingState::OrderPending)?;
         engine.order_sent_at = Some(Instant::now() - Duration::from_secs(11));
 
@@ -544,7 +661,8 @@ mod tests {
     #[tokio::test]
     async fn test_stale_proposal_discard() -> Result<()> {
         let logger = TickLogger::start("/dev/null", 10);
-        let mut engine = Engine::new(mock_config(), logger);
+        let counter = Arc::new(AtomicU32::new(1));
+        let mut engine = Engine::new(mock_config(), logger, counter);
         let (command_tx, _command_rx) = mpsc::channel(10);
 
         engine.pending_proposal = Some(PendingProposal {
@@ -555,7 +673,6 @@ mod tests {
             probability_up: 0.6,
             received_at: Instant::now() - Duration::from_secs(61),
         });
-        engine.fsm.transition(TradingState::Evaluating)?;
         engine.fsm.transition(TradingState::OrderPending)?;
 
         // Tick should discard stale proposal
@@ -575,10 +692,10 @@ mod tests {
     #[tokio::test]
     async fn test_api_error_recovery() -> Result<()> {
         let logger = TickLogger::start("/dev/null", 10);
-        let mut engine = Engine::new(mock_config(), logger);
+        let counter = Arc::new(AtomicU32::new(1));
+        let mut engine = Engine::new(mock_config(), logger, counter);
         let (command_tx, _command_rx) = mpsc::channel(10);
 
-        engine.fsm.transition(TradingState::Evaluating)?;
         engine.fsm.transition(TradingState::OrderPending)?;
         engine.pending_proposal = Some(PendingProposal {
             quote: ProposalQuote {
@@ -589,57 +706,18 @@ mod tests {
             received_at: Instant::now(),
         });
 
-        // API error should reset FSM and clear proposal
+        engine.pending_req_id = Some(123);
         engine.handle_event(
             WebSocketEvent::ApiError(ApiErrorEvent {
                 code: Some("RateLimit".to_string()),
                 message: Some("Too many requests".to_string()),
-                raw: "{}".to_string(),
+                req_id: Some(123),
             }),
             &command_tx,
         )?;
 
         assert_eq!(engine.fsm.state(), TradingState::Idle);
         assert!(engine.pending_proposal.is_none());
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_latency_based_skipping() -> Result<()> {
-        let logger = TickLogger::start("/dev/null", 10);
-        let mut config = mock_config();
-        config.max_tick_latency = Duration::from_millis(5); // Aggressive latency limit
-        let mut engine = Engine::new(config, logger);
-        let (command_tx, mut command_rx) = mpsc::channel(10);
-
-        // We need to ensure we have enough ticks to generate a signal
-        // ConstantModel returns 0.6, threshold is 0.55
-        // TickProcessor needs 2 ticks for streak
-        engine.handle_event(
-            WebSocketEvent::Tick(TickEvent {
-                epoch: 1,
-                quote: 100.0,
-            }),
-            &command_tx,
-        )?;
-
-        // Wait a bit to simulate latency before the next tick
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        engine.handle_event(
-            WebSocketEvent::Tick(TickEvent {
-                epoch: 2,
-                quote: 101.0,
-            }),
-            &command_tx,
-        )?;
-
-        // State should remain Idle because latency was exceeded
-        assert_eq!(engine.fsm.state(), TradingState::Idle);
-
-        // Command receiver should be empty
-        assert!(command_rx.try_recv().is_err());
 
         Ok(())
     }

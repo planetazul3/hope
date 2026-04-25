@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
@@ -24,7 +25,7 @@ use crate::{config::AppConfig, execution::ProposalSpec};
 #[derive(Debug)]
 pub struct DerivWebSocketClient {
     cfg: AppConfig,
-    req_id_counter: AtomicU32,
+    req_id_counter: Arc<AtomicU32>,
 }
 
 #[derive(Debug)]
@@ -54,7 +55,7 @@ pub struct TickEvent {
 pub struct ApiErrorEvent {
     pub code: Option<String>,
     pub message: Option<String>,
-    pub raw: String,
+    pub req_id: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -62,7 +63,8 @@ pub enum TradeUpdate {
     Authorized {
         login_id: String,
         currency: String,
-        req_id: Option<u32>,
+        balance: f64,
+        _req_id: Option<u32>,
     },
     Proposal {
         id: String,
@@ -82,15 +84,27 @@ pub struct OpenContractUpdate {
     pub contract_id: u64,
     pub is_sold: Option<i32>,
     pub profit: Option<f64>,
+    pub req_id: Option<u32>,
 }
 
 #[derive(Debug)]
-#[derive(Debug)]
 pub enum WebSocketCommand {
-    RequestProposal { proposal: ProposalSpec, req_id: u32 },
-    Buy { proposal_id: String, price: f64, req_id: u32 },
-    SubscribeOpenContract { contract_id: u64, req_id: u32 },
-    ClearTrackedContract { contract_id: u64 },
+    RequestProposal {
+        proposal: ProposalSpec,
+        req_id: u32,
+    },
+    Buy {
+        proposal_id: String,
+        price: f64,
+        req_id: u32,
+    },
+    SubscribeOpenContract {
+        contract_id: u64,
+        req_id: u32,
+    },
+    ClearTrackedContract {
+        contract_id: u64,
+    },
 }
 
 #[derive(Serialize)]
@@ -179,13 +193,14 @@ struct BuyPayload {
 struct AuthorizePayload {
     loginid: String,
     currency: String,
+    balance: f64,
 }
 
 impl DerivWebSocketClient {
-    pub fn new(cfg: AppConfig) -> Self {
+    pub fn new(cfg: AppConfig, req_id_counter: Arc<AtomicU32>) -> Self {
         Self {
             cfg,
-            req_id_counter: AtomicU32::new(1),
+            req_id_counter,
         }
     }
 
@@ -241,22 +256,6 @@ impl DerivWebSocketClient {
                         &event_tx,
                         WebSocketEvent::Status(ConnectionStatus::SubscribedTicks),
                     )?;
-
-                    for contract_id in tracked_contracts.iter().copied() {
-                        self.send_json(
-                            &mut write,
-                            &ProposalOpenContractRequest {
-                                proposal_open_contract: 1,
-                                contract_id,
-                                subscribe: 1,
-                                req_id: Some(self.next_req_id()),
-                            },
-                        )
-                        .await
-                        .with_context(|| {
-                            format!("failed to resubscribe open contract {contract_id}")
-                        })?;
-                    }
 
                     loop {
                         tokio::select! {
@@ -362,13 +361,14 @@ impl DerivWebSocketClient {
 
         if let Some(error) = envelope.error {
             error!(?req_id, code = ?error.code, message = ?error.message, "api error received");
-            event_tx.send(
+            try_emit(
+                event_tx,
                 WebSocketEvent::ApiError(ApiErrorEvent {
                     code: error.code,
                     message: error.message,
-                    raw: raw.to_string(),
-                })
-            ).await.map_err(|_| anyhow!("event channel closed"))?;
+                    req_id,
+                }),
+            )?;
             return Ok(());
         }
 
@@ -376,57 +376,65 @@ impl DerivWebSocketClient {
             Some("authorize") => {
                 if let Some(authorize) = envelope.authorize {
                     debug!(?req_id, "received authorization response");
-                    event_tx.send(
+                    try_emit(
+                        event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::Authorized {
                             login_id: authorize.loginid,
                             currency: authorize.currency,
-                            req_id,
-                        })
-                    ).await.map_err(|_| anyhow!("event channel closed"))?;
-                    event_tx.send(
-                        WebSocketEvent::Status(ConnectionStatus::Authorized)
-                    ).await.map_err(|_| anyhow!("event channel closed"))?;
+                            balance: authorize.balance,
+                            _req_id: req_id,
+                        }),
+                    )?;
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::Status(ConnectionStatus::Authorized),
+                    )?;
                 }
             }
             Some("tick") => {
                 if let Some(tick) = envelope.tick {
-                    event_tx.send(
+                    try_emit(
+                        event_tx,
                         WebSocketEvent::Tick(TickEvent {
                             epoch: tick.epoch,
                             quote: tick.quote,
-                        })
-                    ).await.map_err(|_| anyhow!("event channel closed"))?;
+                        }),
+                    )?;
                 }
             }
             Some("proposal") => {
                 if let Some(proposal) = envelope.proposal {
                     debug!(?req_id, proposal_id = %proposal.id, "received proposal");
-                    event_tx.send(
+                    try_emit(
+                        event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::Proposal {
                             id: proposal.id,
                             ask_price: proposal.ask_price,
                             req_id,
-                        })
-                    ).await.map_err(|_| anyhow!("event channel closed"))?;
+                        }),
+                    )?;
                 }
             }
             Some("buy") => {
                 if let Some(buy) = envelope.buy {
                     info!(?req_id, contract_id = %buy.contract_id, "received buy acceptance");
-                    event_tx.send(
+                    try_emit(
+                        event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::BuyAccepted {
                             contract_id: buy.contract_id,
                             buy_price: buy.buy_price,
                             req_id,
-                        })
-                    ).await.map_err(|_| anyhow!("event channel closed"))?;
+                        }),
+                    )?;
                 }
             }
             Some("proposal_open_contract") => {
-                if let Some(update) = envelope.proposal_open_contract {
-                    event_tx.send(
-                        WebSocketEvent::TradeUpdate(TradeUpdate::OpenContract(update))
-                    ).await.map_err(|_| anyhow!("event channel closed"))?;
+                if let Some(mut update) = envelope.proposal_open_contract {
+                    update.req_id = req_id;
+                    try_emit(
+                        event_tx,
+                        WebSocketEvent::TradeUpdate(TradeUpdate::OpenContract(update)),
+                    )?;
                 }
             }
             Some(other) => {
@@ -472,17 +480,13 @@ impl DerivWebSocketClient {
     }
 }
 
-
-
-#[derive(Debug, Deserialize)]
-struct DerivEnvelope {
-    msg_type: Option<String>,
-    error: Option<ApiErrorPayload>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Dispatch {
-    Delivered,
-    ReceiverClosed,
-    Backpressure,
+fn try_emit(tx: &mpsc::Sender<WebSocketEvent>, event: WebSocketEvent) -> Result<()> {
+    match tx.try_send(event) {
+        Ok(_) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!("event channel full; dropping event");
+            Ok(())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(anyhow!("event channel closed")),
+    }
 }

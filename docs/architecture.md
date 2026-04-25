@@ -2,35 +2,33 @@
 
 ## Overview
 
-`hope` is a WebSocket-first, event-driven trading system for Deriv synthetic indices. The system is designed so the execution engine remains deterministic even if the probability model changes.
+`hope` is a WebSocket-first, event-driven trading system for Deriv synthetic indices. The system is structured as a Rust library (`src/lib.rs`) with dedicated binaries for the live trading engine (`src/main.rs`) and strategy backtesting (`src/bin/backtest.rs`).
 
 ## Runtime Flow
 
-1. `src/websocket_client.rs` maintains a single persistent Deriv WebSocket connection.
-2. Tick messages are routed into the engine as typed events.
-3. `src/tick_processor.rs` computes tick direction, streak, volatility, drift, return magnitude, and reversal timing while maintaining a fixed-size ring buffer of 64 entries.
-4. `src/fsm.rs` enforces explicit trade lifecycle transitions: `Idle`, `Evaluating`, `OrderPending`, `InPosition`, and `Cooldown`.
-5. `src/strategy.rs` evaluates the deterministic placeholder model and emits signals only during `Evaluating`.
-6. `src/execution.rs` enforces one API call per tick, minimum API spacing, and latency-based trade skipping.
-7. `src/risk.rs` tracks consecutive losses and moves the system into cooldown after three losses.
-8. `src/tick_logger.rs` writes per-tick audit records without blocking the trading loop.
+1.  **Transport**: `src/websocket_client.rs` maintains a single persistent Deriv WebSocket connection with automatic reconnection logic.
+2.  **Event Routing**: Incoming WebSocket messages are routed into the engine as typed events (Tick, TradeUpdate, ApiError).
+3.  **Tick Processing**: `src/tick_processor.rs` maintains a fixed-size ring buffer of 64 entries. It computes volatility and drift in O(1) time using incremental running sums over a configurable `VOLATILITY_WINDOW`.
+4.  **State Management**: `src/fsm.rs` enforces explicit trade lifecycle transitions: `Idle`, `OrderPending`, `InPosition`, and `Cooldown`.
+5.  **Strategy Evaluation**: `src/strategy.rs` evaluates probability models (e.g., Gaussian or Transformer) during the `Idle` state. Signals are only generated when specific thresholds and streaks (e.g., 2 ticks in the same direction matching the trend) are met.
+6.  **Execution Control**: `src/execution.rs` manages API rate limiting and per-tick call slots using a `PermitGuard` to ensure reliable command delivery.
+7.  **Risk Management**: `src/risk.rs` tracks consecutive losses and sessions metrics, triggering a cooldown state after three losses.
+8.  **Audit Logging**: `src/tick_logger.rs` writes high-resolution audit records asynchronously with restrictive file permissions (`0o600`).
 
 ## Core Boundaries
 
-- System layer: transport, tick processing, FSM, execution control, risk, and logging.
-- Model layer: probability estimation only. The system supports replaceable models satisfying the `ProbabilityModel` trait (e.g., `GaussianModel` or `TransformerModel`).
+-   **System Layer**: Handles transport, tick buffering, FSM transitions, execution gating, risk controls, and logging.
+-   **Model Layer**: Provides probability estimations. The system supports any model satisfying the `ProbabilityModel` trait.
 
-## Connection Model
+## Data & Simulation
 
-- Legacy Deriv WebSocket endpoint: `wss://ws.derivws.com/websockets/v3?app_id=...`
-- Authorization is performed on the socket using the configured token.
-- Reconnect and resubscription are handled by the WebSocket client.
-- This legacy API choice is intentional; see ADR 0005 before changing transport or auth flow.
+-   **Live Engine**: Consumes real-time WebSocket data.
+-   **Backtest Engine**: Consumes historical ticks from CSV (exported from SQLite via `scripts/export_db.py`).
+-   **Structure**: Both engines share the same core logic modules via the `hope` library crate.
 
 ## Operational Constraints
 
-- No REST calls in the trading loop.
-- No per-request reconnects.
-- No concurrent overlapping trades.
-- No implicit state transitions.
-- No dynamic growth in the tick history buffer.
+-   No dynamic heap allocations in the hot path (Tick -> Strategy -> Signal).
+-   Strict "One Trade at a Time" enforcement at the FSM level.
+-   O(1) complexity for all per-tick statistical calculations.
+-   Secure handling of API errors (no raw payloads logged).

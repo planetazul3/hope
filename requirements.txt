@@ -1,0 +1,7 @@
+websockets>=13.1
+torch>=2.4.0
+numpy>=1.26.0
+onnx>=1.16.0
+tract-onnx>=0.21.0
+sqlite3
+csv

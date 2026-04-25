@@ -1,16 +1,6 @@
-mod config;
-mod engine;
-mod execution;
-mod fsm;
-mod risk;
-mod strategy;
-mod tick_logger;
-mod tick_processor;
-mod transformer;
-mod websocket_client;
-
 use anyhow::Result;
-use config::AppConfig;
+use hope::config::AppConfig;
+use hope::engine;
 use tracing::info;
 
 #[tokio::main]

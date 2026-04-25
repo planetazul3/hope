@@ -5,7 +5,10 @@ use std::{
     thread,
 };
 
-use tracing::warn;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+use tracing::{error, warn};
 
 use crate::{fsm::TradingState, tick_processor::TickSnapshot};
 
@@ -32,10 +35,15 @@ impl TickLogger {
         let path = path.to_string();
 
         thread::spawn(move || {
-            let file = match OpenOptions::new().create(true).append(true).open(&path) {
+            let mut options = OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+
+            let file = match options.open(&path) {
                 Ok(file) => file,
                 Err(err) => {
-                    eprintln!("failed to open tick log {path}: {err}");
+                    error!(path = %path, error = %err, "failed to open tick log file");
                     return;
                 }
             };
@@ -56,7 +64,7 @@ impl TickLogger {
                 if writer.write_all(line.as_bytes()).is_err() {
                     break;
                 }
-                let _ = writer.flush();
+                // Removed explicit flush to prevent high I/O overhead
             }
         });
 

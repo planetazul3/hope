@@ -1,24 +1,35 @@
-# Documentation
+# Hope Project Documentation
 
-This directory contains the project documentation for `hope`, a Rust-based trading system for Deriv synthetic indices.
+`hope` is a production-grade trading system for Deriv synthetic indices, designed for low latency, deterministic execution, and auditable performance.
 
-## Contents
+## Documentation Index
 
-- `blueprint.md`: Target production design and system boundaries.
-- `roadmap.md`: Current staged development plan and progress tracker.
-- `architecture.md`: Current system structure, data flow, and component responsibilities.
-- `runbook.md`: Local setup, runtime configuration, and operator-facing execution notes.
-- `adr/README.md`: ADR index and conventions.
-- `reference/README.md`: Read-only local notes for external systems and official vendor docs.
-- `../consolidate_project_sources.py`: Standalone audit tool for generating a single-file source snapshot, including notebook extraction.
+### Core Architecture
+-   **[Architecture](architecture.md)**: System overview, runtime flow, and core boundaries.
+-   **[Blueprint](blueprint.md)**: The target state and design principles of the engine.
+-   **[Roadmap](roadmap.md)**: Current development stage and completed milestones.
 
-## Documentation Rules
+### Operations
+-   **[Runbook](runbook.md)**: Command reference, setup instructions, and troubleshooting.
 
-- Update docs when code changes behavior, configuration, operational flow, or architecture.
-- Update `roadmap.md` when development stage or progress status materially changes.
-- Keep docs concrete and repository-specific; avoid aspirational or undocumented behavior.
-- Record architectural decisions in `docs/adr/` when introducing, changing, or reversing core technical choices.
+### Architectural Decision Records (ADR)
+Detailed justifications for technical choices:
+-   [ADR 0001: WebSocket-first Event-Driven Engine](adr/0001-websocket-first-event-driven-engine.md)
+-   [ADR 0002: Strict FSM for Trade Lifecycle](adr/0002-strict-fsm-for-trade-lifecycle.md)
+-   [ADR 0003: Deterministic Model-System Separation](adr/0003-deterministic-model-system-separation.md)
+-   [ADR 0004: Nonblocking Tick Audit Logging](adr/0004-nonblocking-tick-audit-logging.md)
+-   [ADR 0005: Legacy Deriv WebSocket API Usage](adr/0005-stay-on-legacy-deriv-websocket-api-until-explicitly-replaced.md)
+-   [ADR 0006: Gaussian Probability Model](adr/0006-gaussian-probability-model.md)
+-   [ADR 0007: Neural Inference Integration](adr/0007-neural-inference-integration.md)
 
-## Current Focus
+### Reference
+-   [Deriv API Integration Notes](reference/deriv-api.md)
 
-The current documentation covers the system blueprint, staged roadmap, event-driven trading engine, deterministic FSM execution, and the transition from parametric Gaussian models to non-parametric neural inference (Stage 7).
+## Repository Structure
+
+-   `src/lib.rs`: Core trading logic library.
+-   `src/main.rs`: Live trading engine binary.
+-   `src/bin/backtest.rs`: Strategy simulation binary.
+-   `scripts/`: Python tools for data collection, export, and model training.
+-   `notebooks/`: Research and model experimentation.
+-   `data/`: SQLite storage for market ticks.

@@ -1,26 +1,35 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use std::cell::RefCell;
 use std::path::Path;
 use tract_onnx::prelude::*;
 
 use crate::strategy::ProbabilityModel;
 use crate::tick_processor::TickSnapshot;
 
+type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
 pub struct TransformerModel {
-    model: RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
+    model: TractModel,
     sequence_length: usize,
+    features_buffer: RefCell<Vec<f32>>,
 }
 
 impl TransformerModel {
     pub fn load(path: impl AsRef<Path>, sequence_length: usize) -> Result<Self> {
         let model = tract_onnx::onnx()
-            .model_for_path(path)?
-            .with_input_fact(0, f32::fact(&[1, sequence_length, 5]).into())?
-            .into_optimized()?
-            .into_runnable()?;
+            .model_for_path(path.as_ref())
+            .with_context(|| format!("failed to read ONNX model from {}", path.as_ref().display()))?
+            .with_input_fact(0, f32::fact([1, sequence_length, 5]).into())
+            .context("failed to set model input facts")?
+            .into_optimized()
+            .context("failed to optimize model graph")?
+            .into_runnable()
+            .context("failed to convert model to runnable form")?;
 
         Ok(Self {
             model,
             sequence_length,
+            features_buffer: RefCell::new(Vec::with_capacity(sequence_length * 5)),
         })
     }
 
@@ -32,7 +41,8 @@ impl TransformerModel {
         let start_idx = history.len() - self.sequence_length;
         let sequence = &history[start_idx..];
 
-        let mut data = Vec::with_capacity(self.sequence_length * 5);
+        let mut data = self.features_buffer.borrow_mut();
+        data.clear();
         for tick in sequence {
             data.push(tick.direction.as_i8() as f32);
             data.push(tick.return_magnitude as f32);
@@ -41,18 +51,18 @@ impl TransformerModel {
             data.push(tick.volatility as f32);
         }
 
-        let input = tract_ndarray::Array3::from_shape_vec((1, self.sequence_length, 5), data)
-            .map_err(|err| anyhow!("failed to build input tensor: {err}"))?;
-        
-        let outputs = self.model.run(tvec!(input.into_tensor().into()))?;
+        let input = Tensor::from_shape(&[1, self.sequence_length, 5], &data)?;
+
+        let outputs = self.model.run(tvec!(input.into()))?;
         let output = outputs[0].to_array_view::<f32>()?;
-        
+
         // Safe indexing to avoid rank mismatch panics
-        let prob = output.as_slice()
-            .and_then(|s| s.get(0))
+        let prob = output
+            .as_slice()
+            .and_then(|s| s.first())
             .copied()
             .ok_or_else(|| anyhow!("Empty model output"))?;
-            
+
         Ok(prob as f64)
     }
 }

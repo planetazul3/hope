@@ -1,17 +1,24 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a small Rust binary crate. Application entrypoint code lives in `src/main.rs`, and the runtime is split across focused modules in `src/` such as `websocket_client.rs`, `engine.rs`, `fsm.rs`, and `tick_processor.rs`. Project documentation lives under `docs/`, and architectural decisions live under `docs/adr/`. Keep new modules and docs organized by responsibility rather than by file size alone. If integration coverage becomes necessary, place it in a top-level `tests/` directory.
+This repository is a Rust library crate with multiple binaries. 
+- `src/lib.rs`: Core trading logic and module exports.
+- `src/main.rs`: Entrypoint for the live trading engine.
+- `src/bin/backtest.rs`: Entrypoint for strategy simulation.
+Modules include `websocket_client.rs`, `engine.rs`, `fsm.rs`, `tick_processor.rs`, and `strategy.rs`.
+
+Project documentation lives under `docs/`, and architectural decisions live under `docs/adr/`.
 
 ## Build, Test, and Development Commands
-Use Cargo for all local workflows.
+Use Cargo and the provided Makefile for local workflows.
 
-- `cargo run` starts the trading system with the current `.env` configuration.
-- `cargo check --offline` validates compilation quickly without producing a release binary.
+- `make run` starts the live trading engine.
+- `make backtest` runs strategy simulation on `data/ticks.csv`.
+- `make export` exports ticks from SQLite to CSV for backtesting.
+- `make verify` runs format, check, and tests.
+- `make consolidate` generates an audit snapshot for AI analysis.
 - `cargo fmt` applies standard Rust formatting.
-- `cargo test --offline` runs unit and integration tests; it may be minimal until more tests are added.
-- `python3 consolidate_project_sources.py` generates a timestamped audit snapshot of source, docs, config, and notebooks.
-- `make consolidate` runs the same audit snapshot command through the optional Makefile entry point.
+- `cargo test --offline` runs unit and integration tests.
 
 Run `cargo fmt && cargo check --offline && cargo test --offline` before opening a pull request. If offline resolution stops working because dependencies changed, restore dependency resolution first, regenerate `Cargo.lock`, and then update the documented commands if needed.
 
