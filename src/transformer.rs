@@ -63,47 +63,21 @@ impl TransformerModel {
             // We use history to access data prior to 'sequence' window if needed.
             let global_idx = start_idx + i;
 
-            // HF Frequency proxy
+            // Phase 2: DWT Haar Wavelet Level-1 Decomposition
+            // A1 (Approximation) = (x_t + x_t-1) / sqrt(2)
+            // D1 (Detail) = (x_t - x_t-1) / sqrt(2)
             if global_idx >= 1 {
-                let r1 = history[global_idx].price - history[global_idx - 1].price;
-                let r2 = if global_idx >= 2 {
-                    history[global_idx - 1].price - history[global_idx - 2].price
-                } else {
-                    r1
-                };
-                let mean = (r1 + r2) / 2.0;
-                let std_hf = (((r1 - mean).powi(2) + (r2 - mean).powi(2)) / 2.0).sqrt();
-                data.push(std_hf as f32);
+                let x_t = history[global_idx].price;
+                let x_prev = history[global_idx - 1].price;
+                
+                let a1 = (x_t + x_prev) / 2.0_f64.sqrt();
+                let d1 = (x_t - x_prev) / 2.0_f64.sqrt();
+                
+                // Normalizing A1 by price level to keep it scale-invariant
+                data.push((a1 / x_t) as f32); 
+                data.push(d1 as f32);
             } else {
                 data.push(0.0);
-            }
-
-            // LF Frequency proxy
-            if global_idx >= 3 {
-                let mut sum = 0.0;
-                let mut vals = [0.0; 4];
-                let mut valid = true;
-                for j in 0..4 {
-                    if global_idx < j + 1 {
-                        valid = false;
-                        break;
-                    }
-                    vals[j] = history[global_idx - j].price - history[global_idx - j - 1].price;
-                    sum += vals[j];
-                }
-                
-                if valid {
-                    let mean = sum / 4.0;
-                    let mut var_sum = 0.0;
-                    for v in vals {
-                        var_sum += (v - mean).powi(2);
-                    }
-                    let std_lf = (var_sum / 4.0).sqrt();
-                    data.push(std_lf as f32);
-                } else {
-                    data.push(0.0);
-                }
-            } else {
                 data.push(0.0);
             }
 

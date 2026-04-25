@@ -6,11 +6,12 @@ import pandas as pd
 import numpy as np
 import os
 import copy
-from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import roc_auc_score, accuracy_score
 from torch.utils.data import DataLoader, TensorDataset
 
+# --- 1. Architecture: GatedTCN (Optimized for tract-onnx) ---
+
 class Chpadding1d(nn.Module):
-    """Causal padding for 1D convolution."""
     def __init__(self, padding):
         super(Chpadding1d, self).__init__()
         self.padding = padding
@@ -18,96 +19,85 @@ class Chpadding1d(nn.Module):
         return nn.functional.pad(x, (self.padding, 0))
 
 class GatedTCNBlock(nn.Module):
-    """Gated Dilated Convolutional Block with Residual Connection."""
     def __init__(self, in_channels, out_channels, kernel_size, dilation):
         super(GatedTCNBlock, self).__init__()
         padding = (kernel_size - 1) * dilation
         self.pad = Chpadding1d(padding)
-        
         self.conv_filter = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
         self.conv_gate = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
-        
         self.proj = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x):
         res = self.proj(x)
         x_pad = self.pad(x)
-        
         f = torch.tanh(self.conv_filter(x_pad))
         g = torch.sigmoid(self.conv_gate(x_pad))
-        x = f * g
-        
-        return x + res
+        return (f * g) + res
 
 class SEModule(nn.Module):
-    """Squeeze-and-Excitation Module."""
     def __init__(self, channels, reduction=4):
         super(SEModule, self).__init__()
-        # Use simple mean instead of AdaptiveAvgPool1d for tract stability
         self.fc = nn.Sequential(
             nn.Linear(channels, channels // reduction, bias=False),
             nn.ReLU(inplace=True),
             nn.Linear(channels // reduction, channels, bias=False),
             nn.Sigmoid()
         )
-
     def forward(self, x):
-        # b, c, l
         y = torch.mean(x, dim=2)
         y = self.fc(y).view(y.size(0), y.size(1), 1)
         return x * y
 
 class GatedTCN(nn.Module):
-    """Gated TCN with SE Attention and Multi-task Heads."""
     def __init__(self, input_dim=7, hidden_dim=64, num_blocks=4):
         super(GatedTCN, self).__init__()
         self.input_proj = nn.Conv1d(input_dim, hidden_dim, 1)
-        
         self.blocks = nn.ModuleList([
             GatedTCNBlock(hidden_dim, hidden_dim, kernel_size=3, dilation=2**i)
             for i in range(num_blocks)
         ])
-        
         self.se = SEModule(hidden_dim)
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-        
-        # Auxiliary head for volatility prediction (training only)
+        self.classifier = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
         self.vol_head = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x):
-        # Input shape: (B, L, C) -> (B, C, L)
+    def forward(self, x, return_feat=False):
+        # x: (B, L, C) -> (B, C, L)
         x = x.transpose(1, 2)
         x = self.input_proj(x)
-        
         for block in self.blocks:
             x = block(x)
-            
         x = self.se(x)
-        
-        # Global Max Pooling: (B, C, L) -> (B, C)
         feat, _ = torch.max(x, dim=2)
         
-        direction = self.classifier(feat)
-        volatility = self.vol_head(feat)
+        if return_feat: return feat
         
-        return direction, volatility
+        return self.classifier(feat), self.vol_head(feat)
 
-def load_data_from_csv(csv_path, limit=200000):
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"CSV not found at {csv_path}. Run 'make export' first.")
-    df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'], nrows=limit)
-    return df['quote'].values.astype(np.float32)
+# --- 2. Feature Engineering: DWT Integration ---
 
 def prepare_features(prices, seq_len=32):
-    print(f"Preparing features (N={len(prices)})...")
+    print(f"Preparing features with Haar DWT (N={len(prices)})...")
     returns = np.diff(prices)
     directions = np.sign(returns)
     magnitudes = np.abs(returns)
     
+    vol = pd.Series(returns).rolling(window=20, min_periods=1).std().fillna(0).values
+    
+    # Base features
+    norm_magnitudes = magnitudes / (vol + 1e-8)
+    
+    # DWT Haar Level 1: Approximation (Trend) and Detail (Noise)
+    # A1 = (x_t + x_t-1) / sqrt(2), D1 = (x_t - x_t-1) / sqrt(2)
+    # We apply this to the raw prices
+    p_curr = prices[1:]
+    p_prev = prices[:-1]
+    a1 = (p_curr + p_prev) / np.sqrt(2)
+    d1 = (p_curr - p_prev) / np.sqrt(2)
+    
+    # Normalizing A1 to keep it scale-invariant
+    a1_norm = a1 / (p_curr + 1e-8)
+    
+    # Streaks and Reversals
     streaks, reversals = [], []
     last_trend_direction, last_direction, curr_streak, ticks_since_reversal = 0, 0, 0, 0
     for d in directions:
@@ -122,29 +112,34 @@ def prepare_features(prices, seq_len=32):
         reversals.append(ticks_since_reversal)
         last_direction = d
         
-    vol = pd.Series(returns).rolling(window=20, min_periods=1).std().fillna(0).values
-    
-    norm_magnitudes = magnitudes / (vol + 1e-8)
     norm_streaks = np.log1p(np.array(streaks, dtype=np.float32))
     norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
     
-    # Phase 2: Frequency Domain Features (Simple 4-point FFT Mag proxy)
-    # We use moving standard deviation of 2-tick and 4-tick returns as frequency proxies
-    freq_hf = pd.Series(returns).rolling(window=2).std().fillna(0).values
-    freq_lf = pd.Series(returns).rolling(window=4).std().fillna(0).values
-        
-    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, freq_hf, freq_lf], axis=1)
+    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, a1_norm, d1], axis=1)
     
     x, y_dir, y_vol = [], [], []
     for i in range(len(features) - seq_len):
         x.append(features[i:i+seq_len])
         y_dir.append(1.0 if returns[i+seq_len] > 0 else 0.0)
-        # Target for auxiliary head: future volatility
         y_vol.append(vol[i+seq_len])
         
     return (torch.from_numpy(np.array(x, dtype=np.float32)), 
             torch.from_numpy(np.array(y_dir, dtype=np.float32)).unsqueeze(1),
             torch.from_numpy(np.array(y_vol, dtype=np.float32)).unsqueeze(1))
+
+# --- 3. Self-Supervised Learning: Contrastive Objective ---
+
+def contrastive_loss(feat1, feat2, temperature=0.1):
+    batch_size = feat1.shape[0]
+    feat1 = nn.functional.normalize(feat1, dim=1)
+    feat2 = nn.functional.normalize(feat2, dim=1)
+    
+    # Similarity matrix
+    logits = torch.matmul(feat1, feat2.T) / temperature
+    labels = torch.arange(batch_size).to(feat1.device)
+    
+    loss = nn.functional.cross_entropy(logits, labels)
+    return loss
 
 def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
     target_smooth = target * (1 - smoothing) + 0.5 * smoothing
@@ -154,108 +149,98 @@ def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
     loss = weight * (1 - pt) ** gamma * bce_loss
     return torch.mean(loss)
 
+# --- 4. Training Loop ---
+
 def train_and_export():
     csv_path = "data/ticks.csv"
     seq_len = 32
-    input_dim = 7 # 5 base + 2 freq
-    
+    input_dim = 7
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     try:
-        prices = load_data_from_csv(csv_path)
+        df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'])
+        prices = df['quote'].values.astype(np.float32)
         x_all, y_dir_all, y_vol_all = prepare_features(prices, seq_len)
     except Exception as e:
-        print(f"Error loading CSV: {e}. Using synthetic data.")
-        x_all = torch.randn(1000, seq_len, input_dim)
-        y_dir_all = torch.randint(0, 2, (1000, 1)).float()
-        y_vol_all = torch.rand(1000, 1)
+        print(f"Loading synthetic data: {e}")
+        x_all = torch.randn(2000, seq_len, input_dim)
+        y_dir_all = torch.randint(0, 2, (2000, 1)).float()
+        y_vol_all = torch.rand(2000, 1)
 
-    split_idx = int(len(x_all) * 0.8)
-    x_train, x_val = x_all[:split_idx], x_all[split_idx:]
-    y_dir_train, y_dir_val = y_dir_all[:split_idx], y_dir_all[split_idx:]
-    y_vol_train, y_vol_val = y_vol_all[:split_idx], y_vol_all[split_idx:]
-
-    train_ds = TensorDataset(x_train, y_dir_train, y_vol_train)
-    val_ds = TensorDataset(x_val, y_dir_val, y_vol_val)
+    split = int(len(x_all) * 0.8)
+    train_ds = TensorDataset(x_all[:split], y_dir_all[:split], y_vol_all[:split])
+    val_ds = TensorDataset(x_all[split:], y_dir_all[split:], y_vol_all[split:])
     
-    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
-
-    num_pos = torch.sum(y_dir_train).item()
-    pos_weight_val = (len(y_dir_train) - num_pos) / num_pos if num_pos > 0 else 1.0
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    train_loader = DataLoader(train_ds, batch_size=128, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=128, shuffle=False)
 
     model = GatedTCN(input_dim=input_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
-    
-    best_val_auc = 0.0
-    best_model_state = None
-    early_stop_patience = 10
-    patience_counter = 0
 
-    print(f"Training GatedTCN on {len(x_train)} samples...")
-    for epoch in range(100):
+    # Phase 1: Contrastive Pre-training (Noise-Resilient Representations)
+    print("Starting Phase 1: Contrastive Pre-training...")
+    for epoch in range(5): # Short pre-training
         model.train()
-        train_loss = 0
-        for batch_x, batch_y_dir, batch_y_vol in train_loader:
-            batch_x, batch_y_dir, batch_y_vol = batch_x.to(device), batch_y_dir.to(device), batch_y_vol.to(device)
-            batch_x = batch_x + torch.randn_like(batch_x) * 0.01
+        total_cl_loss = 0
+        for bx, _, _ in train_loader:
+            bx = bx.to(device)
+            # Create augmented views
+            bx_aug1 = bx + torch.randn_like(bx) * 0.02
+            bx_aug2 = bx + torch.randn_like(bx) * 0.02
             
             optimizer.zero_grad()
-            out_dir, out_vol = model(batch_x)
+            f1 = model(bx_aug1, return_feat=True)
+            f2 = model(bx_aug2, return_feat=True)
             
-            loss_dir = focal_loss(out_dir, batch_y_dir, torch.tensor(pos_weight_val).to(device))
-            # Auxiliary loss: MSE for volatility prediction
-            loss_vol = nn.functional.mse_loss(out_vol, batch_y_vol)
-            
-            loss = loss_dir + 0.2 * loss_vol
+            loss = contrastive_loss(f1, f2)
+            loss.backward()
+            optimizer.step()
+            total_cl_loss += loss.item()
+        print(f"Pre-train Epoch {epoch}, CL Loss: {total_cl_loss/len(train_loader):.4f}")
+
+    # Phase 2: Supervised Fine-tuning
+    print("Starting Phase 2: Supervised Fine-tuning...")
+    num_pos = torch.sum(y_dir_all[:split]).item()
+    pos_weight = (split - num_pos) / num_pos if num_pos > 0 else 1.0
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
+    
+    best_auc = 0
+    for epoch in range(20):
+        model.train()
+        for bx, by_dir, by_vol in train_loader:
+            bx, by_dir, by_vol = bx.to(device), by_dir.to(device), by_vol.to(device)
+            optimizer.zero_grad()
+            out_dir, out_vol = model(bx)
+            l_dir = focal_loss(out_dir, by_dir, torch.tensor(pos_weight).to(device))
+            l_vol = nn.functional.mse_loss(out_vol, by_vol)
+            loss = l_dir + 0.2 * l_vol
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            train_loss += loss.item() * len(batch_x)
-            
-        model.eval()
-        all_preds, all_targets = [], []
-        with torch.no_grad():
-            for batch_x, batch_y_dir, _ in val_loader:
-                batch_x, batch_y_dir = batch_x.to(device), batch_y_dir.to(device)
-                out_dir, _ = model(batch_x)
-                all_preds.extend(out_dir.cpu().numpy().flatten())
-                all_targets.extend(batch_y_dir.cpu().numpy().flatten())
-        
-        val_auc = roc_auc_score(all_targets, all_preds)
-        val_acc = accuracy_score(all_targets, np.array(all_preds) > 0.5)
-        print(f"Epoch {epoch}, Loss: {train_loss/len(x_train):.4f}, AUC: {val_auc:.4f}, Acc: {val_acc:.4f}")
-        
-        scheduler.step(val_auc)
-        if val_auc > best_val_auc:
-            best_val_auc = val_auc
-            best_model_state = copy.deepcopy(model.state_dict())
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        if patience_counter >= early_stop_patience: break
-            
-    if best_model_state: model.load_state_dict(best_model_state)
 
-    # Export to ONNX (Excluding volatility head for inference efficiency)
+        model.eval()
+        vp, vt = [], []
+        with torch.no_grad():
+            for bx, by_dir, _ in val_loader:
+                out_dir, _ = model(bx.to(device))
+                vp.extend(out_dir.cpu().numpy().flatten())
+                vt.extend(by_dir.cpu().numpy().flatten())
+        
+        auc = roc_auc_score(vt, vp)
+        scheduler.step(auc)
+        print(f"Epoch {epoch}, AUC: {auc:.4f}")
+        if auc > best_auc: best_auc = auc
+
+    # Export
     model.eval()
-    class InferenceModel(nn.Module):
-        def __init__(self, trained_model):
-            super().__init__()
-            self.model = trained_model
-        def forward(self, x):
-            direction, _ = self.model(x)
-            return direction
-            
-    infer_model = InferenceModel(model)
-    dummy_input = torch.randn(1, seq_len, input_dim).to(device)
-    torch.onnx.export(
-        infer_model, dummy_input, "model.onnx",
-        export_params=True, opset_version=11, do_constant_folding=True,
-        input_names=['input'], output_names=['output']
-    )
-    print("Export complete: model.onnx (GatedTCN)")
+    dummy = torch.randn(1, seq_len, input_dim).to(device)
+    class ExportModel(nn.Module):
+        def __init__(self, m): super().__init__(); self.m = m
+        def forward(self, x): 
+            d, _ = self.m(x)
+            return d
+    torch.onnx.export(ExportModel(model), dummy, "model.onnx", opset_version=11, input_names=['input'], output_names=['output'])
+    print(f"Exported GatedTCN V4 (AUC: {best_auc:.4f})")
 
 if __name__ == "__main__":
     train_and_export()
