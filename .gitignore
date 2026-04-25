@@ -34,10 +34,7 @@ wheels/
 *.onnx.data
 *.pt
 *.pth
-data/*.db
-data/*.sqlite
-data/*.csv
-data/*.parquet
+data/
 
 # Environment & Secret
 .env
@@ -56,3 +53,4 @@ antigravity_venv/
 # Project Specific
 .codex
 *_merged_sources*.txt
+data/
