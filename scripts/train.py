@@ -6,8 +6,22 @@ import pandas as pd
 import numpy as np
 import os
 import copy
+import logging
+from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, accuracy_score
 from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import LambdaLR
+
+# Configure Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("training.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # --- 1. Architecture: GatedTCN (Optimized for tract-onnx) ---
 
@@ -48,9 +62,9 @@ class SEModule(nn.Module):
         y = self.fc(y).view(y.size(0), y.size(1), 1)
         return x * y
 
-class GatedTCN(nn.Module):
+class GatedTCNV4(nn.Module):
     def __init__(self, input_dim=7, hidden_dim=64, num_blocks=4):
-        super(GatedTCN, self).__init__()
+        super(GatedTCNV4, self).__init__()
         self.input_proj = nn.Conv1d(input_dim, hidden_dim, 1)
         self.blocks = nn.ModuleList([
             GatedTCNBlock(hidden_dim, hidden_dim, kernel_size=3, dilation=2**i)
@@ -76,26 +90,23 @@ class GatedTCN(nn.Module):
 # --- 2. Feature Engineering: DWT Integration ---
 
 def prepare_features(prices, seq_len=32):
-    print(f"Preparing features with Haar DWT (N={len(prices)})...")
+    logger.info(f"Preparing features with Haar DWT (N={len(prices)})...")
     returns = np.diff(prices)
     directions = np.sign(returns)
     magnitudes = np.abs(returns)
     
-    vol = pd.Series(returns).rolling(window=20, min_periods=1).std().fillna(0).values
+    vol = pd.Series(returns).rolling(window=10, min_periods=1).std().fillna(0).values
     
     # Base features
     norm_magnitudes = magnitudes / (vol + 1e-8)
     
     # DWT Haar Level 1: Approximation (Trend) and Detail (Noise)
     # A1 = (x_t + x_t-1) / sqrt(2), D1 = (x_t - x_t-1) / sqrt(2)
-    # We apply this to the raw prices
+    # Match Rust TickProcessor implementation
     p_curr = prices[1:]
     p_prev = prices[:-1]
-    a1 = (p_curr + p_prev) / np.sqrt(2)
+    a1 = ((p_curr + p_prev) / np.sqrt(2)) / (p_curr + 1e-8)
     d1 = (p_curr - p_prev) / np.sqrt(2)
-    
-    # Normalizing A1 to keep it scale-invariant
-    a1_norm = a1 / (p_curr + 1e-8)
     
     # Streaks and Reversals
     streaks, reversals = [], []
@@ -115,7 +126,8 @@ def prepare_features(prices, seq_len=32):
     norm_streaks = np.log1p(np.array(streaks, dtype=np.float32))
     norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
     
-    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, a1_norm, d1], axis=1)
+    # Feature vector: [direction, norm_magnitude, log_streak, log_reversal, vol, a1, d1]
+    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, a1, d1], axis=1)
     
     x, y_dir, y_vol = [], [], []
     for i in range(len(features) - seq_len):
@@ -128,6 +140,16 @@ def prepare_features(prices, seq_len=32):
             torch.from_numpy(np.array(y_vol, dtype=np.float32)).unsqueeze(1))
 
 # --- 3. Self-Supervised Learning: Contrastive Objective ---
+
+def block_mask(x, mask_ratio=0.15, block_size=4):
+    x = x.clone()
+    batch_size, seq_len, dim = x.shape
+    num_blocks = max(1, int((seq_len * mask_ratio) // block_size))
+    for b in range(batch_size):
+        for _ in range(num_blocks):
+            start = np.random.randint(0, seq_len - block_size + 1)
+            x[b, start:start+block_size, :] = 0
+    return x
 
 def contrastive_loss(feat1, feat2, temperature=0.1):
     batch_size = feat1.shape[0]
@@ -156,13 +178,16 @@ def train_and_export():
     seq_len = 32
     input_dim = 7
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    logger.info(f"Using device: {device}")
+    logger.info(f"PyTorch Version: {torch.__version__}")
 
     try:
         df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'])
         prices = df['quote'].values.astype(np.float32)
         x_all, y_dir_all, y_vol_all = prepare_features(prices, seq_len)
     except Exception as e:
-        print(f"Loading synthetic data: {e}")
+        logger.warning(f"Loading synthetic data: {e}")
         x_all = torch.randn(2000, seq_len, input_dim)
         y_dir_all = torch.randint(0, 2, (2000, 1)).float()
         y_vol_all = torch.rand(2000, 1)
@@ -174,19 +199,20 @@ def train_and_export():
     train_loader = DataLoader(train_ds, batch_size=128, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=128, shuffle=False)
 
-    model = GatedTCN(input_dim=input_dim).to(device)
+    model = GatedTCNV4(input_dim=input_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
 
     # Phase 1: Contrastive Pre-training (Noise-Resilient Representations)
-    print("Starting Phase 1: Contrastive Pre-training...")
-    for epoch in range(5): # Short pre-training
+    logger.info("Starting Phase 1: Contrastive Pre-training...")
+    for epoch in range(5):
         model.train()
         total_cl_loss = 0
-        for bx, _, _ in train_loader:
+        pbar = tqdm(train_loader, desc=f"Pre-train Epoch {epoch}")
+        for bx, _, _ in pbar:
             bx = bx.to(device)
-            # Create augmented views
-            bx_aug1 = bx + torch.randn_like(bx) * 0.02
-            bx_aug2 = bx + torch.randn_like(bx) * 0.02
+            bx = bx.to(device)
+            bx_aug1 = block_mask(bx)
+            bx_aug2 = block_mask(bx)
             
             optimizer.zero_grad()
             f1 = model(bx_aug1, return_feat=True)
@@ -196,18 +222,31 @@ def train_and_export():
             loss.backward()
             optimizer.step()
             total_cl_loss += loss.item()
-        print(f"Pre-train Epoch {epoch}, CL Loss: {total_cl_loss/len(train_loader):.4f}")
+            pbar.set_postfix(cl_loss=f"{loss.item():.4f}")
+        logger.info(f"Pre-train Epoch {epoch}, CL Loss: {total_cl_loss/len(train_loader):.4f}")
 
     # Phase 2: Supervised Fine-tuning
-    print("Starting Phase 2: Supervised Fine-tuning...")
+    logger.info("Starting Phase 2: Supervised Fine-tuning...")
     num_pos = torch.sum(y_dir_all[:split]).item()
     pos_weight = (split - num_pos) / num_pos if num_pos > 0 else 1.0
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
+    
+    # Warmup + Plateau Scheduler
+    base_lr = 0.001
+    warmup_epochs = 5
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return (epoch + 1) / warmup_epochs
+        return 1.0
+    
+    warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     
     best_auc = 0
     for epoch in range(20):
         model.train()
-        for bx, by_dir, by_vol in train_loader:
+        total_loss = 0
+        pbar = tqdm(train_loader, desc=f"Fine-tune Epoch {epoch}")
+        for bx, by_dir, by_vol in pbar:
             bx, by_dir, by_vol = bx.to(device), by_dir.to(device), by_vol.to(device)
             optimizer.zero_grad()
             out_dir, out_vol = model(bx)
@@ -217,6 +256,8 @@ def train_and_export():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            total_loss += loss.item()
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         model.eval()
         vp, vt = [], []
@@ -227,8 +268,12 @@ def train_and_export():
                 vt.extend(by_dir.cpu().numpy().flatten())
         
         auc = roc_auc_score(vt, vp)
-        scheduler.step(auc)
-        print(f"Epoch {epoch}, AUC: {auc:.4f}")
+        if epoch < warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            plateau_scheduler.step(auc)
+            
+        logger.info(f"Epoch {epoch}, AUC: {auc:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
         if auc > best_auc: best_auc = auc
 
     # Export
@@ -239,8 +284,40 @@ def train_and_export():
         def forward(self, x): 
             d, _ = self.m(x)
             return d
-    torch.onnx.export(ExportModel(model), dummy, "model.onnx", opset_version=11, input_names=['input'], output_names=['output'])
-    print(f"Exported GatedTCN V4 (AUC: {best_auc:.4f})")
+    
+    onnx_path = "model.onnx"
+    torch.onnx.export(
+        ExportModel(model), dummy, onnx_path, 
+        opset_version=11, input_names=['input'], output_names=['output']
+    )
+    logger.info(f"Exported GatedTCNV4 (AUC: {best_auc:.4f})")
+
+    # Post-export verification
+    try:
+        import onnxruntime as ort
+        sess = ort.InferenceSession(onnx_path)
+        input_name = sess.get_inputs()[0].name
+        output = sess.run(None, {input_name: dummy.cpu().numpy()})
+        logger.info(f"ONNX Verification Successful. Output shape: {output[0].shape}")
+        if output[0].shape == (1, 1):
+            logger.info("Output shape verified: (1, 1)")
+        else:
+            logger.error(f"Unexpected output shape: {output[0].shape}")
+    except Exception as e:
+        logger.error(f"ONNX Verification Failed: {e}")
+
+    # Task 8: INT8 Quantization
+    try:
+        from onnxruntime.quantization import quantize_dynamic, QuantType
+        quant_path = "model_quantized.onnx"
+        quantize_dynamic(onnx_path, quant_path, weight_type=QuantType.QUInt8)
+        logger.info(f"Dynamic INT8 Quantization Successful: {quant_path}")
+        
+        orig_size = os.path.getsize(onnx_path) / 1024
+        quant_size = os.path.getsize(quant_path) / 1024
+        logger.info(f"Model Compression: {orig_size:.2f} KB -> {quant_size:.2f} KB ({100*(1-quant_size/orig_size):.1f}% reduction)")
+    except Exception as e:
+        logger.warning(f"Quantization skipped or failed: {e}")
 
 if __name__ == "__main__":
     train_and_export()

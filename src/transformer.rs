@@ -69,18 +69,17 @@ impl TransformerModel {
             if global_idx >= 1 {
                 let x_t = history[global_idx].price;
                 let x_prev = history[global_idx - 1].price;
-                
+
                 let a1 = (x_t + x_prev) / 2.0_f64.sqrt();
                 let d1 = (x_t - x_prev) / 2.0_f64.sqrt();
-                
+
                 // Normalizing A1 by price level to keep it scale-invariant
-                data.push((a1 / x_t) as f32); 
+                data.push((a1 / x_t) as f32);
                 data.push(d1 as f32);
             } else {
                 data.push(0.0);
                 data.push(0.0);
             }
-
         }
 
         let input = Tensor::from_shape(&[1, self.sequence_length, 7], &data)?;

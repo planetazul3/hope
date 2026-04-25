@@ -26,6 +26,8 @@ pub struct TickSnapshot {
     pub drift: f64,
     pub return_magnitude: f64,
     pub ticks_since_reversal: u32,
+    pub dwt_a1: f64,
+    pub dwt_d1: f64,
 }
 
 #[derive(Debug)]
@@ -118,6 +120,14 @@ impl TickProcessor {
         self.return_sum += current_return;
         self.return_sq_sum += current_return.powi(2);
 
+        let (dwt_a1, dwt_d1) = match self.last_price {
+            Some(prev) => {
+                let sqrt2 = 2.0f64.sqrt();
+                ((price + prev) / sqrt2, (price - prev) / sqrt2)
+            }
+            None => (0.0, 0.0),
+        };
+
         let snapshot_without_stats = TickSnapshot {
             epoch,
             price,
@@ -127,6 +137,8 @@ impl TickProcessor {
             drift: 0.0,
             return_magnitude: current_return.abs(),
             ticks_since_reversal: self.ticks_since_reversal,
+            dwt_a1,
+            dwt_d1,
         };
 
         self.ring[self.next_index] = snapshot_without_stats;
@@ -137,7 +149,7 @@ impl TickProcessor {
         self.last_streak = streak;
 
         // Calculate volatility and drift over the available history
-        let (volatility, drift) = self.calculate_stats();
+        let (volatility, drift, _, _) = self.calculate_stats(dwt_a1, dwt_d1);
 
         let mut snapshot = snapshot_without_stats;
         snapshot.volatility = volatility;
@@ -150,10 +162,10 @@ impl TickProcessor {
         snapshot
     }
 
-    fn calculate_stats(&self) -> (f64, f64) {
+    fn calculate_stats(&self, a1: f64, d1: f64) -> (f64, f64, f64, f64) {
         let count = self.len.min(Self::VOLATILITY_WINDOW);
         if count < 2 {
-            return (0.0, 0.0);
+            return (0.0, 0.0, a1, d1);
         }
 
         let n = (count - 1) as f64;
@@ -161,7 +173,7 @@ impl TickProcessor {
         let variance = (self.return_sq_sum / n) - mean.powi(2);
         let std_dev = variance.max(0.0).sqrt();
 
-        (std_dev, mean)
+        (std_dev, mean, a1, d1)
     }
 
     #[cfg(test)]
