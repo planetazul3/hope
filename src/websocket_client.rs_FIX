@@ -1,3 +1,0 @@
-        Err(mpsc::error::TrySendError::Closed(_)) => Err(anyhow!("event channel closed")),
-    }
-}
