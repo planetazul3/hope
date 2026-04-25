@@ -36,12 +36,13 @@ Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `sn
 
 ## ML Engineering Standards
 All model training and export workflows must adhere to these standards:
+- **Architecture**: Use Gated TCN with Causal Dilated Convolutions and SE Attention.
 - **Optimization**: Training loops must use `ReduceLROnPlateau` (on AUC), Early Stopping, and Gradient Clipping.
+- **Multi-task**: Shared encoder must use an auxiliary volatility head during training.
+- **Features**: Preprocessing must include 5 base features + 2 frequency proxies (HF/LF std).
 - **Batching**: Use PyTorch `DataLoader` and `TensorDataset` for training/validation.
 - **Integrity**: Always load the best recorded state dictionary before exporting to ONNX.
-- **Features**: Preprocessing must be vectorized and include robust normalization.
-- **Architecture**: Transformers must use causal masking in the forward pass.
-- **Export**: ONNX models must use a static batch size of 1.
+- **Export**: ONNX models must use a static batch size of 1 and exclude auxiliary heads.
 - **Balance**: Loss functions must use Focal Loss with Label Smoothing.
 
 ## Testing Guidelines

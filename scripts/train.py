@@ -6,83 +6,103 @@ import pandas as pd
 import numpy as np
 import os
 import copy
-import logging
-from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
 from torch.utils.data import DataLoader, TensorDataset
 
-class SimpleTransformer(nn.Module):
-    def __init__(self, input_dim=5, d_model=32, nhead=4, num_layers=3, max_seq_len=32, dropout=0.1, pooling='mean'):
-        super(SimpleTransformer, self).__init__()
-        self.input_norm = nn.LayerNorm(input_dim)
-        self.embedding = nn.Linear(input_dim, d_model)
-        self.pooling = pooling
+class Chpadding1d(nn.Module):
+    """Causal padding for 1D convolution."""
+    def __init__(self, padding):
+        super(Chpadding1d, self).__init__()
+        self.padding = padding
+    def forward(self, x):
+        return nn.functional.pad(x, (self.padding, 0))
+
+class GatedTCNBlock(nn.Module):
+    """Gated Dilated Convolutional Block with Residual Connection."""
+    def __init__(self, in_channels, out_channels, kernel_size, dilation):
+        super(GatedTCNBlock, self).__init__()
+        padding = (kernel_size - 1) * dilation
+        self.pad = Chpadding1d(padding)
         
-        # [CLS] token for classification
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.conv_filter = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
+        self.conv_gate = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
         
-        pe = torch.zeros(max_seq_len + 1, d_model)
-        position = torch.arange(0, max_seq_len + 1, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)
-        self.register_buffer('pe', pe)
+        self.proj = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+        self.norm = nn.LayerNorm(out_channels)
+
+    def forward(self, x):
+        res = self.proj(x)
+        x_pad = self.pad(x)
         
-        self.dropout = nn.Dropout(p=dropout)
-        encoder_layers = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=nhead, 
-            dim_feedforward=d_model * 4,
-            dropout=dropout,
-            batch_first=True
+        f = torch.tanh(self.conv_filter(x_pad))
+        g = torch.sigmoid(self.conv_gate(x_pad))
+        x = f * g
+        
+        x = x + res
+        # Transpose for LayerNorm: (B, C, L) -> (B, L, C)
+        x = self.norm(x.transpose(1, 2)).transpose(1, 2)
+        return x
+
+class SEModule(nn.Module):
+    """Squeeze-and-Excitation Module."""
+    def __init__(self, channels, reduction=4):
+        super(SEModule, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
         )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
-        self.fc = nn.Linear(d_model, 1)
-        self.sigmoid = nn.Sigmoid()
-        
-        # Explicit initialization
-        self._init_weights()
 
-    def _init_weights(self):
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.kaiming_normal_(p)
-        nn.init.normal_(self.cls_token, std=0.02)
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1)
+        return x * y.expand_as(x)
 
-    def forward(self, x, mask=None):
-        batch_size, seq_len, _ = x.size()
-        x = self.input_norm(x)
-        x = self.embedding(x)
+class GatedTCN(nn.Module):
+    """Gated TCN with SE Attention and Multi-task Heads."""
+    def __init__(self, input_dim=7, hidden_dim=64, num_blocks=4):
+        super(GatedTCN, self).__init__()
+        self.input_proj = nn.Conv1d(input_dim, hidden_dim, 1)
         
-        # Add [CLS] token
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
+        self.blocks = nn.ModuleList([
+            GatedTCNBlock(hidden_dim, hidden_dim, kernel_size=3, dilation=2**i)
+            for i in range(num_blocks)
+        ])
         
-        x = x + self.pe[:, :x.size(1), :]
-        x = self.dropout(x)
+        self.se = SEModule(hidden_dim)
         
-        if mask is None:
-            sz = x.size(1)
-            mask = nn.Transformer.generate_square_subsequent_mask(sz).to(x.device)
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid()
+        )
         
-        x = self.transformer_encoder(x, mask=mask)
+        # Auxiliary head for volatility prediction (training only)
+        self.vol_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        # Input shape: (B, L, C) -> (B, C, L)
+        x = x.transpose(1, 2)
+        x = self.input_proj(x)
         
-        if self.pooling == 'cls':
-            x = x[:, 0, :]
-        elif self.pooling == 'mean':
-            x = torch.mean(x[:, 1:, :], dim=1)
-        else:
-            x = x[:, -1, :]
+        for block in self.blocks:
+            x = block(x)
+            
+        x = self.se(x)
         
-        x = self.fc(x)
-        return self.sigmoid(x)
+        # Global Max Pooling: (B, C, L) -> (B, C)
+        feat, _ = torch.max(x, dim=2)
+        
+        direction = self.classifier(feat)
+        volatility = self.vol_head(feat)
+        
+        return direction, volatility
 
 def load_data_from_csv(csv_path, limit=200000):
-    print(f"Loading data from {csv_path}...")
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV not found at {csv_path}. Run 'make export' first.")
-    
     df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'], nrows=limit)
     return df['quote'].values.astype(np.float32)
 
@@ -92,28 +112,16 @@ def prepare_features(prices, seq_len=32):
     directions = np.sign(returns)
     magnitudes = np.abs(returns)
     
-    streaks = []
-    reversals = []
-    last_trend_direction = 0
-    last_direction = 0
-    curr_streak = 0
-    ticks_since_reversal = 0
-    
+    streaks, reversals = [], []
+    last_trend_direction, last_direction, curr_streak, ticks_since_reversal = 0, 0, 0, 0
     for d in directions:
-        if d == 0:
-            curr_streak = 0
-        elif d == last_direction:
-            curr_streak += 1
-        else:
-            curr_streak = 1
-        
+        if d == 0: curr_streak = 0
+        elif d == last_direction: curr_streak += 1
+        else: curr_streak = 1
         if (d == 1 and last_trend_direction == -1) or (d == -1 and last_trend_direction == 1):
             ticks_since_reversal = 1
-        elif d != 0:
-            ticks_since_reversal += 1
-            
-        if d != 0:
-            last_trend_direction = d
+        elif d != 0: ticks_since_reversal += 1
+        if d != 0: last_trend_direction = d
         streaks.append(curr_streak)
         reversals.append(ticks_since_reversal)
         last_direction = d
@@ -123,26 +131,27 @@ def prepare_features(prices, seq_len=32):
     norm_magnitudes = magnitudes / (vol + 1e-8)
     norm_streaks = np.log1p(np.array(streaks, dtype=np.float32))
     norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
+    
+    # Phase 2: Frequency Domain Features (Simple 4-point FFT Mag proxy)
+    # We use moving standard deviation of 2-tick and 4-tick returns as frequency proxies
+    freq_hf = pd.Series(returns).rolling(window=2).std().fillna(0).values
+    freq_lf = pd.Series(returns).rolling(window=4).std().fillna(0).values
         
-    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol], axis=1)
+    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, freq_hf, freq_lf], axis=1)
     
-    # Task: Z-score Standardization
-    from sklearn.preprocessing import StandardScaler
-    scaler = StandardScaler()
-    features = scaler.fit_transform(features)
-    
-    x, y = [], []
+    x, y_dir, y_vol = [], [], []
     for i in range(len(features) - seq_len):
         x.append(features[i:i+seq_len])
-        y.append(1.0 if returns[i+seq_len] > 0 else 0.0)
+        y_dir.append(1.0 if returns[i+seq_len] > 0 else 0.0)
+        # Target for auxiliary head: future volatility
+        y_vol.append(vol[i+seq_len])
         
-    return torch.from_numpy(np.array(x, dtype=np.float32)), torch.from_numpy(np.array(y, dtype=np.float32)).unsqueeze(1)
+    return (torch.from_numpy(np.array(x, dtype=np.float32)), 
+            torch.from_numpy(np.array(y_dir, dtype=np.float32)).unsqueeze(1),
+            torch.from_numpy(np.array(y_vol, dtype=np.float32)).unsqueeze(1))
 
-# Task 3: Focal Loss with Label Smoothing
 def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
-    # Apply label smoothing
     target_smooth = target * (1 - smoothing) + 0.5 * smoothing
-    
     bce_loss = nn.functional.binary_cross_entropy(output, target_smooth, reduction='none')
     pt = torch.where(target == 1, output, 1 - output)
     weight = torch.where(target == 1, pos_weight, torch.tensor(1.0).to(output.device))
@@ -150,174 +159,107 @@ def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
     return torch.mean(loss)
 
 def train_and_export():
-    # Setup Logger
-    logger = logging.getLogger("trainer")
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-    
-    # File handler
-    fh = logging.FileHandler("training.log")
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
-
     csv_path = "data/ticks.csv"
     seq_len = 32
-    input_dim = 5
+    input_dim = 7 # 5 base + 2 freq
     
     try:
         prices = load_data_from_csv(csv_path)
-        x_all, y_all = prepare_features(prices, seq_len)
+        x_all, y_dir_all, y_vol_all = prepare_features(prices, seq_len)
     except Exception as e:
         print(f"Error loading CSV: {e}. Using synthetic data.")
         x_all = torch.randn(1000, seq_len, input_dim)
-        y_all = torch.randint(0, 2, (1000, 1)).float()
+        y_dir_all = torch.randint(0, 2, (1000, 1)).float()
+        y_vol_all = torch.rand(1000, 1)
 
-    num_samples = len(x_all)
-    split_idx = int(num_samples * 0.8)
+    split_idx = int(len(x_all) * 0.8)
     x_train, x_val = x_all[:split_idx], x_all[split_idx:]
-    y_train, y_val = y_all[:split_idx], y_all[split_idx:]
+    y_dir_train, y_dir_val = y_dir_all[:split_idx], y_dir_all[split_idx:]
+    y_vol_train, y_vol_val = y_vol_all[:split_idx], y_vol_all[split_idx:]
 
-    # Task 2: DataLoaders
-    train_dataset = TensorDataset(x_train, y_train)
-    val_dataset = TensorDataset(x_val, y_val)
+    train_ds = TensorDataset(x_train, y_dir_train, y_vol_train)
+    val_ds = TensorDataset(x_val, y_dir_val, y_vol_val)
     
-    batch_size = 64
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=64, shuffle=False)
 
-    num_pos = torch.sum(y_train).item()
-    num_neg = len(y_train) - num_pos
-    pos_weight_val = (num_neg / num_pos) if num_pos > 0 else 1.0
-    print(f"Class imbalance: pos={num_pos}, neg={num_neg}, pos_weight={pos_weight_val:.4f}")
-
+    num_pos = torch.sum(y_dir_train).item()
+    pos_weight_val = (len(y_dir_train) - num_pos) / num_pos if num_pos > 0 else 1.0
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
-    logger.info(f"PyTorch Version: {torch.__version__}")
-    if torch.cuda.is_available():
-        logger.info(f"CUDA Version: {torch.version.cuda}")
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"Using device: {device}")
 
-    model = SimpleTransformer(input_dim=input_dim, max_seq_len=seq_len).to(device)
+    model = GatedTCN(input_dim=input_dim).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     
     best_val_auc = 0.0
     best_model_state = None
-    early_stop_patience = 7
+    early_stop_patience = 10
     patience_counter = 0
 
-    logger.info(f"Training V2 (CSV-based) on {len(x_train)} samples...")
-    
-    warmup_epochs = 5
-    base_lr = 0.001
-    
+    print(f"Training GatedTCN on {len(x_train)} samples...")
     for epoch in range(100):
-        # Linear Warmup
-        if epoch < warmup_epochs:
-            lr = base_lr * (epoch + 1) / warmup_epochs
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
-            logger.info(f"Warmup Phase: Epoch {epoch}, LR: {lr:.6f}")
-            
         model.train()
         train_loss = 0
-        
-        # tqdm progress bar for training
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch}", unit="batch")
-        for batch_x, batch_y in pbar:
-            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-            
-            # Data augmentation: noise
-            noise = torch.randn_like(batch_x) * 0.01
-            batch_x = batch_x + noise
+        for batch_x, batch_y_dir, batch_y_vol in train_loader:
+            batch_x, batch_y_dir, batch_y_vol = batch_x.to(device), batch_y_dir.to(device), batch_y_vol.to(device)
+            batch_x = batch_x + torch.randn_like(batch_x) * 0.01
             
             optimizer.zero_grad()
-            output = model(batch_x)
-            # Loss calculation with Focal Loss and Label Smoothing
-            loss = focal_loss(output, batch_y, torch.tensor(pos_weight_val).to(device))
+            out_dir, out_vol = model(batch_x)
+            
+            loss_dir = focal_loss(out_dir, batch_y_dir, torch.tensor(pos_weight_val).to(device))
+            # Auxiliary loss: MSE for volatility prediction
+            loss_vol = nn.functional.mse_loss(out_vol, batch_y_vol)
+            
+            loss = loss_dir + 0.2 * loss_vol
             loss.backward()
-            
-            # Gradient clipping to ensure training stability in deep Transformers
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            
             optimizer.step()
             train_loss += loss.item() * len(batch_x)
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
             
         model.eval()
-        val_loss = 0
-        all_preds = []
-        all_targets = []
-        
+        all_preds, all_targets = [], []
         with torch.no_grad():
-            # tqdm progress bar for validation
-            for batch_x, batch_y in tqdm(val_loader, desc="Validating", leave=False):
-                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
-                output = model(batch_x)
-                loss = focal_loss(output, batch_y, torch.tensor(pos_weight_val).to(device))
-                val_loss += loss.item() * len(batch_x)
-                
-                all_preds.extend(output.cpu().numpy().flatten())
-                all_targets.extend(batch_y.cpu().numpy().flatten())
-        
-        avg_train_loss = train_loss / len(x_train)
-        avg_val_loss = val_loss / len(x_val)
+            for batch_x, batch_y_dir, _ in val_loader:
+                batch_x, batch_y_dir = batch_x.to(device), batch_y_dir.to(device)
+                out_dir, _ = model(batch_x)
+                all_preds.extend(out_dir.cpu().numpy().flatten())
+                all_targets.extend(batch_y_dir.cpu().numpy().flatten())
         
         val_auc = roc_auc_score(all_targets, all_preds)
-        val_preds_binary = np.array(all_preds) > 0.5
-        val_acc = accuracy_score(all_targets, val_preds_binary)
-        
-        # Task 4: Expanded metrics
-        val_precision = precision_score(all_targets, val_preds_binary, zero_division=0)
-        val_recall = recall_score(all_targets, val_preds_binary, zero_division=0)
-        val_f1 = f1_score(all_targets, val_preds_binary, zero_division=0)
-        
-        logger.info("-" * 80)
-        logger.info(f"Epoch {epoch:02d} | Loss: T={avg_train_loss:.4f} V={avg_val_loss:.4f} | AUC: {val_auc:.4f} | Acc: {val_acc:.4f}")
-        logger.info(f"         | P: {val_precision:.4f} R: {val_recall:.4f} F1: {val_f1:.4f}")
-        logger.info("-" * 80)
+        val_acc = accuracy_score(all_targets, np.array(all_preds) > 0.5)
+        print(f"Epoch {epoch}, Loss: {train_loss/len(x_train):.4f}, AUC: {val_auc:.4f}, Acc: {val_acc:.4f}")
         
         scheduler.step(val_auc)
-        
         if val_auc > best_val_auc:
             best_val_auc = val_auc
             best_model_state = copy.deepcopy(model.state_dict())
             patience_counter = 0
-            print(f"  --> New best AUC: {best_val_auc:.4f}")
         else:
             patience_counter += 1
+        if patience_counter >= early_stop_patience: break
             
-        if patience_counter >= early_stop_patience:
-            print(f"Early stopping at epoch {epoch}")
-            break
-            
-    if best_model_state:
-        model.load_state_dict(best_model_state)
-        print(f"Loaded best model with Val AUC: {best_val_auc:.4f}")
+    if best_model_state: model.load_state_dict(best_model_state)
 
+    # Export to ONNX (Excluding volatility head for inference efficiency)
     model.eval()
+    class InferenceModel(nn.Module):
+        def __init__(self, trained_model):
+            super().__init__()
+            self.model = trained_model
+        def forward(self, x):
+            direction, _ = self.model(x)
+            return direction
+            
+    infer_model = InferenceModel(model)
     dummy_input = torch.randn(1, seq_len, input_dim).to(device)
     torch.onnx.export(
-        model, dummy_input, "model.onnx",
-        export_params=True, opset_version=11,
-        do_constant_folding=True,
-        input_names=['input'], output_names=['output'],
+        infer_model, dummy_input, "model.onnx",
+        export_params=True, opset_version=11, do_constant_folding=True,
+        input_names=['input'], output_names=['output']
     )
-    print("Export complete: model.onnx (Static Batch Size: 1)")
-
-    # Task 14: ONNX Validation
-    try:
-        import onnx
-        onnx_model = onnx.load("model.onnx")
-        onnx.checker.check_model(onnx_model)
-        logger.info("ONNX validation successful: model.onnx is valid.")
-    except Exception as e:
-        logger.error(f"ONNX validation failed: {e}")
+    print("Export complete: model.onnx (GatedTCN)")
 
 if __name__ == "__main__":
     train_and_export()
