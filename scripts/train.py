@@ -6,14 +6,17 @@ import pandas as pd
 import numpy as np
 import os
 import copy
+import logging
+from tqdm import tqdm
 from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
 from torch.utils.data import DataLoader, TensorDataset
 
 class SimpleTransformer(nn.Module):
-    def __init__(self, input_dim=5, d_model=32, nhead=4, num_layers=3, max_seq_len=32, dropout=0.1):
+    def __init__(self, input_dim=5, d_model=32, nhead=4, num_layers=3, max_seq_len=32, dropout=0.1, pooling='mean'):
         super(SimpleTransformer, self).__init__()
         self.input_norm = nn.LayerNorm(input_dim)
         self.embedding = nn.Linear(input_dim, d_model)
+        self.pooling = pooling
         
         pe = torch.zeros(max_seq_len, d_model)
         position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
@@ -46,7 +49,12 @@ class SimpleTransformer(nn.Module):
             mask = nn.Transformer.generate_square_subsequent_mask(sz).to(x.device)
         
         x = self.transformer_encoder(x, mask=mask)
-        x = torch.mean(x, dim=1)
+        
+        if self.pooling == 'mean':
+            x = torch.mean(x, dim=1)
+        else:
+            x = x[:, -1, :]
+        
         x = self.fc(x)
         return self.sigmoid(x)
 
@@ -117,6 +125,21 @@ def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
     return torch.mean(loss)
 
 def train_and_export():
+    # Setup Logger
+    logger = logging.getLogger("trainer")
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    
+    # File handler
+    fh = logging.FileHandler("training.log")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    
+    # Console handler
+    ch = logging.StreamHandler()
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
     csv_path = "data/ticks.csv"
     seq_len = 32
     input_dim = 5
@@ -148,7 +171,11 @@ def train_and_export():
     print(f"Class imbalance: pos={num_pos}, neg={num_neg}, pos_weight={pos_weight_val:.4f}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logger.info(f"Using device: {device}")
+    logger.info(f"PyTorch Version: {torch.__version__}")
+    if torch.cuda.is_available():
+        logger.info(f"CUDA Version: {torch.version.cuda}")
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
 
     model = SimpleTransformer(input_dim=input_dim, max_seq_len=seq_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
@@ -159,13 +186,14 @@ def train_and_export():
     early_stop_patience = 7
     patience_counter = 0
 
-    print(f"Training V2 (CSV-based) on {len(x_train)} samples...")
+    logger.info(f"Training V2 (CSV-based) on {len(x_train)} samples...")
     for epoch in range(100):
         model.train()
         train_loss = 0
         
-        # Task 2: Iterate over DataLoader
-        for batch_x, batch_y in train_loader:
+        # tqdm progress bar for training
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch}", unit="batch")
+        for batch_x, batch_y in pbar:
             batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             
             # Data augmentation: noise
@@ -183,6 +211,7 @@ def train_and_export():
             
             optimizer.step()
             train_loss += loss.item() * len(batch_x)
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
             
         model.eval()
         val_loss = 0
@@ -190,7 +219,8 @@ def train_and_export():
         all_targets = []
         
         with torch.no_grad():
-            for batch_x, batch_y in val_loader:
+            # tqdm progress bar for validation
+            for batch_x, batch_y in tqdm(val_loader, desc="Validating", leave=False):
                 batch_x, batch_y = batch_x.to(device), batch_y.to(device)
                 output = model(batch_x)
                 loss = focal_loss(output, batch_y, torch.tensor(pos_weight_val).to(device))
@@ -211,7 +241,10 @@ def train_and_export():
         val_recall = recall_score(all_targets, val_preds_binary, zero_division=0)
         val_f1 = f1_score(all_targets, val_preds_binary, zero_division=0)
         
-        print(f"Epoch {epoch}, Loss: T={avg_train_loss:.4f} V={avg_val_loss:.4f}, AUC: {val_auc:.4f}, Acc: {val_acc:.4f}, P: {val_precision:.4f}, R: {val_recall:.4f}, F1: {val_f1:.4f}")
+        logger.info("-" * 80)
+        logger.info(f"Epoch {epoch:02d} | Loss: T={avg_train_loss:.4f} V={avg_val_loss:.4f} | AUC: {val_auc:.4f} | Acc: {val_acc:.4f}")
+        logger.info(f"         | P: {val_precision:.4f} R: {val_recall:.4f} F1: {val_f1:.4f}")
+        logger.info("-" * 80)
         
         scheduler.step(val_auc)
         
@@ -240,6 +273,15 @@ def train_and_export():
         input_names=['input'], output_names=['output'],
     )
     print("Export complete: model.onnx (Static Batch Size: 1)")
+
+    # Task 14: ONNX Validation
+    try:
+        import onnx
+        onnx_model = onnx.load("model.onnx")
+        onnx.checker.check_model(onnx_model)
+        logger.info("ONNX validation successful: model.onnx is valid.")
+    except Exception as e:
+        logger.error(f"ONNX validation failed: {e}")
 
 if __name__ == "__main__":
     train_and_export()

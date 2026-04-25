@@ -12,8 +12,8 @@ Status values:
 
 ## Current Stage Summary
 
-- Current active stage: `Stage 8 - Simulation & Performance Hardening` (Complete)
-- Overall state: Production-ready modular engine with zero-allocation hot paths and verified backtesting capabilities.
+- Current active stage: `Stage 9 - ML Pipeline Observability and Portability` (Complete)
+- Overall state: Production-ready modular engine with zero-allocation hot paths, verified backtesting capabilities, and a standardized, observable ML pipeline.
 
 ## Stage 1 - Deterministic Core Foundation
 
@@ -54,3 +54,13 @@ Status: `Done`
 - Harden API reliability with `PermitGuard` logic
 - Implement secure logging (filtered error payloads and restrictive file permissions)
 - Enhance session auditing with live balance tracking and Win Rate metrics
+
+## Stage 9 - ML Pipeline Observability and Portability
+
+Status: `Done`
+
+- Implement structured logging (`training.log`) for full training traceability
+- Standardize cross-platform notebook execution (Google Colab / Kaggle / Local)
+- Implement configurable model pooling (`mean` vs `last`) for architecture flexibility
+- Add post-export ONNX validation and integrity checks
+- Enhance UX with real-time `tqdm` progress visualization and hardware auditing
