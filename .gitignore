@@ -42,6 +42,7 @@ data/
 !.env.example
 .venv
 antigravity_venv/
+*venv*/
 
 # IDEs & OS
 .vscode/
