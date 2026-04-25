@@ -36,6 +36,10 @@ model_quantized.onnx
 *.pt
 *.pth
 data/
+data/*
+*.zip
+*.db
+*.csv
 
 # Environment & Secret
 .env
@@ -55,3 +59,5 @@ antigravity_venv/
 # Project Specific
 .codex
 *_merged_sources*.txt
+data/ticks.csv
+data/tick_store.db
