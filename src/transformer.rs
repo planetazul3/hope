@@ -50,9 +50,11 @@ impl TransformerModel {
         data.clear();
         for tick in sequence {
             data.push(tick.direction.as_i8() as f32);
-            data.push(tick.return_magnitude as f32);
-            data.push(tick.streak as f32);
-            data.push(tick.ticks_since_reversal as f32);
+            // Task 3: Normalized return magnitude
+            data.push((tick.return_magnitude as f32) / (tick.volatility as f32 + 1e-8));
+            // Task 3: Log-transformed streak and reversal
+            data.push((tick.streak as f32).ln_1p());
+            data.push((tick.ticks_since_reversal as f32).ln_1p());
             data.push(tick.volatility as f32);
         }
 

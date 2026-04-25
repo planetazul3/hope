@@ -88,8 +88,13 @@ def prepare_features(prices, seq_len=32):
         
     # Task 3: Vectorized volatility calculation
     vol = pd.Series(returns).rolling(window=20, min_periods=1).std().fillna(0).values
+    
+    # Task 1: Feature normalization
+    norm_magnitudes = magnitudes / (vol + 1e-8)
+    norm_streaks = np.log1p(np.array(streaks, dtype=np.float32))
+    norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
         
-    features = np.stack([directions, magnitudes, streaks, reversals, vol], axis=1)
+    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol], axis=1)
     
     x, y = [], []
     for i in range(len(features) - seq_len):

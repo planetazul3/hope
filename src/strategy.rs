@@ -129,11 +129,20 @@ where
         let probability_down = 1.0 - probability_up;
 
         // Task 6: Dynamic confidence threshold
-        let adjusted_threshold = if tick.volatility < 0.0001 {
-            self.threshold + 0.05
-        } else {
-            self.threshold
-        };
+        let mut adjusted_threshold = self.threshold;
+
+        // Reward strong momentum
+        if tick.streak >= 4 {
+            adjusted_threshold -= 0.02;
+        }
+
+        // Penalty for low volatility
+        if tick.volatility < 0.0001 {
+            adjusted_threshold += 0.05;
+        }
+
+        // Clamp to ensure it doesn't fall below floor
+        adjusted_threshold = adjusted_threshold.max(self.threshold - 0.05);
 
         // General trend is positive if probability_up > 0.5 (driven by positive drift)
         // General trend is negative if probability_down > 0.5 (driven by negative drift)
