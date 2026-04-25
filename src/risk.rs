@@ -52,6 +52,17 @@ impl RiskManager {
             total_profit: self.total_profit,
         }
     }
+
+    pub fn stats(&self) -> RiskOutcome {
+        RiskOutcome {
+            consecutive_losses: self.consecutive_losses,
+            enter_cooldown: self.consecutive_losses >= self.max_consecutive_losses,
+            total_trades: self.total_trades,
+            wins: self.wins,
+            losses: self.losses,
+            total_profit: self.total_profit,
+        }
+    }
 }
 
 #[cfg(test)]

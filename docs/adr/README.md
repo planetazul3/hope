@@ -23,3 +23,4 @@ This directory stores Architecture Decision Records (ADRs) for `hope`.
 - [0010 - Structured Logging and Environment-Aware Training](./0010-structured-logging-and-environment-aware-training.md)
 - [0011 - Gated TCN with Squeeze-and-Excitation](./0011-gated-tcn-architecture.md)
 - [0012 - Noise-Resilient Training with DWT and Contrastive Pre-training](./0012-noise-resilient-training.md)
+- [0013 - High-Fidelity Backtesting Methodology](./0013-high-fidelity-backtesting.md)

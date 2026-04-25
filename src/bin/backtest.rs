@@ -1,12 +1,14 @@
+use anyhow::Result;
 use hope::config::AppConfig;
-use hope::fsm::TradingState;
-use hope::strategy::{AnyModel, GaussianModel, StrategyEngine};
+use hope::fsm::{TradingFsm, TradingState};
+use hope::risk::RiskManager;
+use hope::strategy::{AnyModel, GaussianModel, SignalDirection, StrategyEngine};
 use hope::tick_processor::{TickProcessor, TickSnapshot};
 use hope::transformer::TransformerModel;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-fn main() {
+fn main() -> Result<()> {
     let config = AppConfig::load().expect("failed to load configuration");
 
     let csv_path = "data/ticks.csv";
@@ -14,6 +16,8 @@ fn main() {
     let reader = BufReader::new(file);
 
     let mut processor = TickProcessor::new();
+    let mut fsm = TradingFsm::new();
+    let mut risk = RiskManager::new(3); // Match engine default
 
     // Task 5: Dynamic model instantiation based on config
     let model = match config.model_type {
@@ -41,19 +45,18 @@ fn main() {
         config.strategy_min_return_ratio,
     );
 
-    let mut total_trades = 0;
-    let mut wins = 0;
-    let mut losses = 0;
-    let mut total_profit = 0.0;
+    let mut total_ticks = 0;
+    let mut cooldown_remaining = 0;
+    let mut entry_price = 0.0;
+    let mut entry_tick = 0;
+    let mut signal_dir = SignalDirection::Up;
 
     let stake = config.stake;
-    let payout_ratio = 0.95;
-
-    let mut in_position: Option<(hope::strategy::SignalDirection, f64, u64)> = None;
+    let payout_ratio = 0.95; // Standard payout
     let mut history_buffer = [TickSnapshot::default(); 64];
 
     for line in reader.lines() {
-        let line = line.expect("failed to read line");
+        let line = line?;
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() < 2 {
             continue;
@@ -61,48 +64,56 @@ fn main() {
 
         let epoch: u64 = parts[0].parse().unwrap_or(0);
         let quote: f64 = parts[1].parse().unwrap_or(0.0);
-
-        if let Some((dir, entry_price, _)) = in_position {
-            let profit = if dir == hope::strategy::SignalDirection::Up {
-                if quote > entry_price {
-                    stake * payout_ratio
-                } else {
-                    -stake
-                }
-            } else {
-                if quote < entry_price {
-                    stake * payout_ratio
-                } else {
-                    -stake
-                }
-            };
-
-            total_trades += 1;
-            if profit > 0.0 {
-                wins += 1;
-            } else {
-                losses += 1;
-            }
-            total_profit += profit;
-
-            in_position = None;
-            continue;
-        }
-
         let snapshot = processor.push(epoch, quote);
+        total_ticks += 1;
 
-        // Task 6: Use dynamically loaded transformer_sequence_length
-        let count = processor.last_n_into(config.transformer_sequence_length, &mut history_buffer);
-        let history = &history_buffer[..count];
-        let decision = strategy.evaluate(&snapshot, history, TradingState::Idle);
+        match fsm.state() {
+            TradingState::Idle => {
+                let count = processor.last_n_into(config.transformer_sequence_length, &mut history_buffer);
+                let history = &history_buffer[..count];
+                let decision = strategy.evaluate(&snapshot, history, TradingState::Idle);
 
-        if let Some(signal) = decision.signal {
-            in_position = Some((signal, quote, epoch));
+                if let Some(signal) = decision.signal {
+                    entry_price = quote;
+                    entry_tick = total_ticks;
+                    signal_dir = signal;
+                    fsm.transition(TradingState::OrderPending)?;
+                    fsm.transition(TradingState::InPosition)?;
+                }
+            }
+            TradingState::InPosition => {
+                if total_ticks - entry_tick >= config.duration_ticks {
+                    let profit = if signal_dir == SignalDirection::Up {
+                        if quote > entry_price { stake * payout_ratio } else { -stake }
+                    } else {
+                        if quote < entry_price { stake * payout_ratio } else { -stake }
+                    };
+
+                    let outcome = risk.on_trade_closed(profit);
+                    if outcome.enter_cooldown {
+                        cooldown_remaining = config.cooldown_ticks;
+                        fsm.transition(TradingState::Cooldown)?;
+                    } else {
+                        fsm.transition(TradingState::Idle)?;
+                    }
+                }
+            }
+            TradingState::Cooldown => {
+                cooldown_remaining = cooldown_remaining.saturating_sub(1);
+                if cooldown_remaining == 0 {
+                    fsm.transition(TradingState::Idle)?;
+                }
+            }
+            TradingState::OrderPending => {
+                // Should not happen in backtest as we jump directly to InPosition
+                fsm.transition(TradingState::InPosition)?;
+            }
         }
     }
 
-    let win_rate = if total_trades > 0 {
-        (wins as f64 / total_trades as f64) * 100.0
+    let outcome = risk.stats();
+    let win_rate = if outcome.total_trades > 0 {
+        (outcome.wins as f64 / outcome.total_trades as f64) * 100.0
     } else {
         0.0
     };
@@ -110,10 +121,12 @@ fn main() {
     println!("--- Backtest Results ---");
     println!("Model:        {:?}", config.model_type);
     println!("Threshold:    {:.4}", config.probability_threshold);
-    println!("Total Trades: {}", total_trades);
-    println!("Wins:         {}", wins);
-    println!("Losses:       {}", losses);
+    println!("Total Trades: {}", outcome.total_trades);
+    println!("Wins:         {}", outcome.wins);
+    println!("Losses:       {}", outcome.losses);
     println!("Win Rate:     {:.2}%", win_rate);
-    println!("Total Profit: {:.2}", total_profit);
+    println!("Total Profit: {:.2}", outcome.total_profit);
     println!("------------------------");
+
+    Ok(())
 }
