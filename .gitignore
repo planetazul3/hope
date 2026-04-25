@@ -1,10 +1,58 @@
+# Rust
 /target
-.env
 **/*.rs.bk
-*.log
-venv/
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.ruff_cache/
+
+# Data & Models
+*.log
 *.onnx
+*.onnx.data
 *.pt
+*.pth
+data/*.db
+data/*.sqlite
+data/*.csv
+data/*.parquet
+
+# Environment & Secret
+.env
+.env.*
+!.env.example
+.venv
+antigravity_venv/
+
+# IDEs & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project Specific
 .codex
 *_merged_sources*.txt
