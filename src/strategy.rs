@@ -37,7 +37,6 @@ impl ProbabilityModel for GaussianModel {
     }
 }
 
-#[allow(dead_code)]
 pub enum AnyModel {
     Gaussian(GaussianModel),
     Transformer(Box<crate::transformer::TransformerModel>),

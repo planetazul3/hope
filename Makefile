@@ -53,5 +53,12 @@ setup:
 	$(PYTHON) -m pip install -r requirements.txt
 
 clean:
+	@echo "Removing logs and snapshots only."
+	rm -f tick_audit.log *_merged_sources.txt project_snapshot.txt
+	$(CARGO) clean
+
+clean-all:
+	@echo "WARNING: permanently deleting locally collected data/ticks.csv"
+	@echo "You will need to re-run make collect and make export to restore the dataset."
 	rm -f tick_audit.log *_merged_sources.txt data/ticks.csv project_snapshot.txt
 	$(CARGO) clean

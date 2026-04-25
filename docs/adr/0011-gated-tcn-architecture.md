@@ -16,7 +16,7 @@ We will transition the primary ML backbone from a Transformer to a **Gated Tempo
 1. **Causal Dilated Convolutions**: Replaces attention with dilated kernels (rates 1, 2, 4, 8) to capture multi-scale patterns with a fixed receptive field.
 2. **Gating Mechanism**: Uses `Tanh` filter and `Sigmoid` gate (WaveNet-style) to learn non-linear feature selection, effectively acting as a learnable noise filter.
 3. **Squeeze-and-Excitation (SE)**: Adds channel-wise attention to dynamically recalibrate feature maps based on market regime.
-4. **Frequency-Domain Features**: Expands the input vector from 5 to 7 dimensions by adding HF (2-tick std) and LF (4-tick std) proxies.
+4. **Frequency-Domain Features**: Expands the input vector from 5 to 8 dimensions by adding HF (2-tick std) and LF (4-tick std) proxies.
 5. **Multi-Task Learning**: Adds an auxiliary volatility prediction head during training to regularize the shared encoder.
 
 ## Consequences

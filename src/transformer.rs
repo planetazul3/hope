@@ -54,15 +54,16 @@ impl TransformerModel {
             data.push((tick.ticks_since_reversal as f32).ln_1p());
             data.push(tick.volatility as f32);
 
-            // 6-8: Frequency proxies (Phase 2)
-            // HF: std of last 2 returns. LF: std of last 4 returns.
-            // We use history to access data prior to 'sequence' window if needed.
+            // 6: Haar A1 approximation normalized by price
+            // 7: Haar D1 detail coefficient
+            // 8: Short-term to long-term volatility ratio
             let global_idx = start_idx + i;
 
             // Phase 2: DWT Haar Wavelet Level-1 Decomposition
             // A1 (Approximation) = (x_t + x_t-1) / sqrt(2)
             // D1 (Detail) = (x_t - x_t-1) / sqrt(2)
             if global_idx >= 1 {
+                // The first tick in the history cannot produce DWT coefficients and receives 0 padding for DWT
                 let x_t = history[global_idx].price;
                 let x_prev = history[global_idx - 1].price;
 

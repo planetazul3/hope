@@ -44,6 +44,7 @@ pub struct AppConfig {
     pub strategy_momentum_reward: f64,
     /// Minimum return as ratio of volatility (noise filter).
     pub strategy_min_return_ratio: f64,
+    pub max_consecutive_losses: u32,
     /// Path to the tick audit log file.
     pub tick_audit_log_path: String,
     /// Payout ratio for wins (e.g., 0.95 for 95%).
@@ -143,6 +144,7 @@ impl AppConfig {
                 "STRATEGY_MIN_RETURN_RATIO",
                 0.1,
             )?,
+            max_consecutive_losses: parse_or_default(&env_map, "DERIV_MAX_CONSECUTIVE_LOSSES", 3)?,
             tick_audit_log_path: lookup_env(&env_map, "TICK_AUDIT_LOG_PATH")
                 .map(|v| v.into_owned())
                 .unwrap_or_else(|_| "tick_audit.log".to_string()),
@@ -206,6 +208,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
     fn parses_environment_case_insensitively() {
         std::env::set_var("DERIV_ENVIRONMENT", "real");
         std::env::set_var("DERIV_REAL_TOKEN", "token");

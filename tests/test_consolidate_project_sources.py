@@ -17,11 +17,10 @@ class ConsolidateProjectSourcesTest(unittest.TestCase):
                 [
                     "python3",
                     str(SCRIPT_PATH),
-                    "--project-root",
+                    "--root",
                     str(REPO_ROOT),
                     "--output",
                     str(output_path),
-                    "--no-update-gitignore",
                 ],
                 capture_output=True,
                 text=True,
@@ -38,7 +37,7 @@ class ConsolidateProjectSourcesTest(unittest.TestCase):
 
             self.assertIn("FILE: notebooks/train_transformer.ipynb", snapshot)
             self.assertIn(
-                "# Related local training script: scripts/train.py",
+                "FILE: scripts/hope_ml/common.py",
                 snapshot,
             )
 

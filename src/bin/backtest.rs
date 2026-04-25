@@ -17,7 +17,7 @@ fn main() -> Result<()> {
 
     let mut processor = TickProcessor::new();
     let mut fsm = TradingFsm::new();
-    let mut risk = RiskManager::new(3); // Match engine default
+    let mut risk = RiskManager::new(config.max_consecutive_losses); // Match engine default
 
     // Task 5: Dynamic model instantiation based on config
     let model = match config.model_type {

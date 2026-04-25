@@ -113,7 +113,7 @@ impl Engine {
                 config.strategy_min_return_ratio,
             ),
             execution: ExecutionEngine::new(config.min_api_interval, config.max_tick_latency),
-            risk: RiskManager::new(3),
+            risk: RiskManager::new(config.max_consecutive_losses),
             tick_processor: TickProcessor::new(),
             fsm: TradingFsm::new(),
             cooldown_remaining: 0,
@@ -605,6 +605,7 @@ mod tests {
             strategy_volatility_penalty: 0.05,
             strategy_momentum_reward: 0.02,
             strategy_min_return_ratio: 0.1,
+            max_consecutive_losses: 3,
             tick_audit_log_path: "/dev/null".to_string(),
             payout_ratio: 0.95,
         }

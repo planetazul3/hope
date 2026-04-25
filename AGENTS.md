@@ -37,7 +37,7 @@ Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `sn
 All model training and export workflows must adhere to these standards:
 - **Architecture**: Use Gated TCN with Causal Dilated Convolutions and SE Attention (V4).
 - **Optimization**: Training loops must use a two-phase curriculum starting with Contrastive Pre-training (InfoNCE) and then Supervised Fine-tuning with Focal Loss and Volatility MSE, using ReduceLROnPlateau and warmup scheduler.
-- **Features**: Preprocessing must include 5 base features + 2 Haar Wavelet DWT coefficients (A1/D1).
+- **Features**: Preprocessing must include 8 features: 5 base features, 2 Haar Wavelet DWT coefficients A1 and D1, and 1 short-to-long-term volatility ratio.
 - **Batching**: Use PyTorch `DataLoader` and `TensorDataset`.
 - **Integrity**: Always load the best recorded state dictionary before exporting to ONNX.
 - **Export**: ONNX models must use a static batch size of 1 and exclude auxiliary heads.

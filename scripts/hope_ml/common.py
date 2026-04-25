@@ -6,9 +6,9 @@ import logging
 
 # --- Architecture: GatedTCN (Optimized for tract-onnx) ---
 
-class Chpadding1d(nn.Module):
+class CausalPadding1d(nn.Module):
     def __init__(self, padding):
-        super(Chpadding1d, self).__init__()
+        super(CausalPadding1d, self).__init__()
         self.padding = padding
     def forward(self, x):
         return nn.functional.pad(x, (self.padding, 0))
@@ -17,7 +17,7 @@ class GatedTCNBlock(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, dilation):
         super(GatedTCNBlock, self).__init__()
         padding = (kernel_size - 1) * dilation
-        self.pad = Chpadding1d(padding)
+        self.pad = CausalPadding1d(padding)
         self.conv_filter = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
         self.conv_gate = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
         self.proj = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
@@ -113,7 +113,13 @@ def prepare_features(prices, seq_len=32):
         y_dir.append(1.0 if returns[i+seq_len] > 0 else 0.0)
         y_vol.append(vol[i+seq_len])
         
+    y_dir_tensor = torch.from_numpy(np.array(y_dir, dtype=np.float32)).unsqueeze(1)
+    pos_ratio = float(torch.sum(y_dir_tensor) / len(y_dir_tensor)) * 100
+    logging.info(f"Class balance: {pos_ratio:.2f}% positive labels")
+    print(f"Class balance: {pos_ratio:.2f}% positive labels")
+    
     return (torch.from_numpy(np.array(x, dtype=np.float32)), 
+            y_dir_tensor, 
             torch.from_numpy(np.array(y_dir, dtype=np.float32)).unsqueeze(1),
             torch.from_numpy(np.array(y_vol, dtype=np.float32)).unsqueeze(1))
 
@@ -127,8 +133,9 @@ def contrastive_loss(feat1, feat2, temperature=0.1):
     logits = torch.matmul(feat1, feat2.T) / temperature
     labels = torch.arange(batch_size).to(feat1.device)
     
-    loss = nn.functional.cross_entropy(logits, labels)
-    return loss
+    loss1 = nn.functional.cross_entropy(logits, labels)
+    loss2 = nn.functional.cross_entropy(logits.T, labels)
+    return (loss1 + loss2) / 2.0
 
 def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
     target_smooth = target * (1 - smoothing) + 0.5 * smoothing
@@ -144,13 +151,16 @@ def block_mask(x, mask_ratio=0.15, block_size=4):
     num_blocks = l // block_size
     num_masked_blocks = int(num_blocks * mask_ratio)
     
+    noise_mask = torch.ones(b, l, 1, dtype=torch.bool, device=x.device)
     for i in range(b):
         masked_indices = np.random.choice(num_blocks, num_masked_blocks, replace=False)
         for idx in masked_indices:
-            x[i, idx*block_size : (idx+1)*block_size, :] = 0
+            start_idx = idx * block_size
+            end_idx = (idx + 1) * block_size
+            x[i, start_idx : end_idx, :] = 0
+            noise_mask[i, start_idx : end_idx, :] = False
             
     # Inject Gaussian noise to non-masked elements
     noise = torch.randn_like(x) * 0.01
-    mask = (x != 0).float()
-    x = x + noise * mask
+    x = x + noise * noise_mask.float()
     return x

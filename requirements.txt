@@ -5,6 +5,7 @@ onnx==1.21.0
 pandas==3.0.2
 scikit-learn==1.8.0
 tqdm==4.67.3
-onnxscript==0.7.0
 matplotlib==3.7.0
 python-dotenv==1.2.2
+seaborn==0.12.2
+onnxruntime==1.20.1

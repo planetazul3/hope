@@ -3,6 +3,7 @@ import sqlite3
 import json
 import argparse
 import sys
+import os
 import time
 
 try:
@@ -12,8 +13,8 @@ except ImportError:
     sys.exit(1)
 
 # Default configuration
-app_id = "1089"
-DERIV_WS_URL = f"wss://ws.binaryws.com/websockets/v3?app_id={app_id}"
+app_id = os.environ.get("DERIV_APP_ID", "1089")
+DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
 BATCH_SIZE = 5000
 RATE_LIMIT_SLEEP = 1.5
 TICKS_PER_HOUR = 3600 # Approx for 1s indices
@@ -79,6 +80,7 @@ async def collect_ticks(symbol: str, target_count: int, db_path: str, hours: flo
     prev_oldest_epoch = None
     batch_num = 0
 
+    print(f"Connecting to: {DERIV_WS_URL}")
     print(f"Starting collection: symbol={symbol}, target={target_count:,}, db={db_path}")
     print("Press Ctrl+C to stop gracefully.")
 
@@ -145,7 +147,7 @@ async def collect_ticks(symbol: str, target_count: int, db_path: str, hours: flo
 
 async def main_async():
     parser = argparse.ArgumentParser(description="Deriv tick collector")
-    parser.add_argument("--symbol", default="1HZ75V", help="Deriv symbol (default: 1HZ75V)")
+    parser.add_argument("--symbol", default="1HZ90V", help="Deriv symbol (default: 1HZ90V)")
     parser.add_argument("--count", type=int, default=86400, help="Target ticks (default: 86400 for 24h)")
     parser.add_argument("--db", default="data/tick_store.db", help="DB path")
     parser.add_argument("--hours", type=float, default=24, help="Last N hours")
