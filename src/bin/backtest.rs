@@ -69,7 +69,8 @@ fn main() -> Result<()> {
 
         match fsm.state() {
             TradingState::Idle => {
-                let count = processor.last_n_into(config.transformer_sequence_length, &mut history_buffer);
+                let count =
+                    processor.last_n_into(config.transformer_sequence_length, &mut history_buffer);
                 let history = &history_buffer[..count];
                 let decision = strategy.evaluate(&snapshot, history, TradingState::Idle);
 
@@ -84,9 +85,17 @@ fn main() -> Result<()> {
             TradingState::InPosition => {
                 if total_ticks - entry_tick >= config.duration_ticks {
                     let profit = if signal_dir == SignalDirection::Up {
-                        if quote > entry_price { stake * payout_ratio } else { -stake }
+                        if quote > entry_price {
+                            stake * payout_ratio
+                        } else {
+                            -stake
+                        }
                     } else {
-                        if quote < entry_price { stake * payout_ratio } else { -stake }
+                        if quote < entry_price {
+                            stake * payout_ratio
+                        } else {
+                            -stake
+                        }
                     };
 
                     let outcome = risk.on_trade_closed(profit);

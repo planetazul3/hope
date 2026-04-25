@@ -514,9 +514,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let dropped = AtomicU64::new(0);
         let event = WebSocketEvent::Status(ConnectionStatus::Connected);
-        
+
         try_emit(&tx, event, &dropped).unwrap();
-        
+
         assert_eq!(dropped.load(Ordering::Relaxed), 0);
         let received = rx.try_recv().unwrap();
         if let WebSocketEvent::Status(ConnectionStatus::Connected) = received {
@@ -530,14 +530,15 @@ mod tests {
     fn test_try_emit_dropped() {
         let (tx, _rx) = mpsc::channel(1);
         let dropped = AtomicU64::new(0);
-        
+
         // Fill the channel
-        tx.try_send(WebSocketEvent::Status(ConnectionStatus::Connected)).unwrap();
-        
+        tx.try_send(WebSocketEvent::Status(ConnectionStatus::Connected))
+            .unwrap();
+
         // Next emit should drop
         let event = WebSocketEvent::Status(ConnectionStatus::Disconnected);
         try_emit(&tx, event, &dropped).unwrap();
-        
+
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 }

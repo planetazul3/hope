@@ -76,6 +76,5 @@ Status: `In Progress`
 - Synchronize Python and Rust feature calculation for 7-dimensional DWT inputs
 - Implement Multi-task learning (Auxiliary Volatility Head) for latent space regularization
 - Implement High-Fidelity Backtesting simulation in `src/bin/backtest.rs`
-- [Planned] Implement INT8 Quantization for ONNX models to optimize L1/L2 cache residency
-
-- [Planned] Explore regime-specific scaling and contrastive pre-training on multi-instrument data
+- Implement INT8 Quantization for ONNX models to optimize L1/L2 cache residency
+- Explore regime-specific scaling and contrastive pre-training on multi-instrument data

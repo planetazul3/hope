@@ -42,11 +42,7 @@ LOG_LEVEL=debug make run
     ```bash
     make export
     ```
-2.  **Train Model** (Optional): Run the Transformer V2 training script:
-    ```bash
-    python3 scripts/train.py
-    ```
-    Alternatively, upload `data/ticks.csv` to Google Colab using `notebooks/train_transformer.ipynb`.
+2.  **Train Model** (Optional): Upload `data/ticks.csv` to a cloud platform like Google Colab and run the training notebook using `notebooks/train_transformer.ipynb`.
 3.  **Run Simulation**:
     ```bash
     make backtest

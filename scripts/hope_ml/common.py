@@ -44,7 +44,7 @@ class SEModule(nn.Module):
         return x * y
 
 class GatedTCNV4(nn.Module):
-    def __init__(self, input_dim=7, hidden_dim=64, num_blocks=4):
+    def __init__(self, input_dim=8, hidden_dim=64, num_blocks=4):
         super(GatedTCNV4, self).__init__()
         self.input_proj = nn.Conv1d(input_dim, hidden_dim, 1)
         self.blocks = nn.ModuleList([
@@ -75,7 +75,9 @@ def prepare_features(prices, seq_len=32):
     directions = np.sign(returns)
     magnitudes = np.abs(returns)
     
-    vol = pd.Series(returns).rolling(window=20, min_periods=1).std().fillna(0).values
+    vol = pd.Series(returns).rolling(window=10, min_periods=1).std().fillna(0).values
+    long_term_vol = pd.Series(returns).rolling(window=50, min_periods=1).std().fillna(0).values
+    vol_ratio = vol / (long_term_vol + 1e-8)
     
     norm_magnitudes = magnitudes / (vol + 1e-8)
     
@@ -103,7 +105,7 @@ def prepare_features(prices, seq_len=32):
     norm_streaks = np.log1p(np.array(streaks, dtype=np.float32))
     norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
     
-    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, a1_norm, d1], axis=1)
+    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, a1_norm, d1, vol_ratio], axis=1)
     
     x, y_dir, y_vol = [], [], []
     for i in range(len(features) - seq_len):
@@ -146,4 +148,9 @@ def block_mask(x, mask_ratio=0.15, block_size=4):
         masked_indices = np.random.choice(num_blocks, num_masked_blocks, replace=False)
         for idx in masked_indices:
             x[i, idx*block_size : (idx+1)*block_size, :] = 0
+            
+    # Inject Gaussian noise to non-masked elements
+    noise = torch.randn_like(x) * 0.01
+    mask = (x != 0).float()
+    x = x + noise * mask
     return x

@@ -1,3 +1,7 @@
+# Commands
+PYTHON ?= python3
+CARGO  ?= cargo
+
 .PHONY: help fmt check test verify run backtest export collect consolidate setup clean
 
 # Default target
@@ -17,36 +21,37 @@ help:
 	@echo "clean       : Remove audit logs and temporary artifacts"
 
 fmt:
-	cargo fmt
+	$(CARGO) fmt
 
 check:
-	cargo check --offline
+	$(CARGO) check --offline
 
 test:
-	cargo test --offline
+	$(CARGO) test --offline
 
 verify: fmt check test
 
 run:
-	cargo run --bin hope --offline
+	$(CARGO) run --offline
 
 backtest:
-	cargo run --bin backtest --offline
+	$(CARGO) run --bin backtest --offline
+
+train:
+	@echo "Please upload data/ticks.csv and execute the training notebook exclusively in a cloud environment (e.g. Google Colab/Kaggle)."
 
 export:
-	python3 scripts/export_db.py
+	$(PYTHON) scripts/export_db.py
 
 collect:
 	$(PYTHON) scripts/tick_collector.py --hours 24
 
 consolidate:
-	python3 consolidate_project_sources.py
+	$(PYTHON) consolidate_project_sources.py
 
 setup:
-	pip install -r requirements.txt
+	$(PYTHON) -m pip install -r requirements.txt
 
 clean:
-	rm -f tick_audit.log *_merged_sources.txt data/ticks.csv
-	cargo clean
-csv
-	cargo clean
+	rm -f tick_audit.log *_merged_sources.txt data/ticks.csv project_snapshot.txt
+	$(CARGO) clean

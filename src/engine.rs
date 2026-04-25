@@ -128,7 +128,10 @@ impl Engine {
             pending_subscription_req_id: None,
             pending_probability: None,
             req_id_counter,
-            history_buffer: vec![TickSnapshot::default(); config.transformer_sequence_length.max(64)],
+            history_buffer: vec![
+                TickSnapshot::default();
+                config.transformer_sequence_length.max(64)
+            ],
             config,
             balance: 0.0,
         }

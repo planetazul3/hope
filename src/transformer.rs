@@ -10,9 +10,9 @@ type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Bo
 
 /// Gated TCN probability model using ONNX inference.
 ///
-/// This model (V3) uses causal dilated gated convolutions with Squeeze-and-Excitation
+/// This model (V4) uses causal dilated gated convolutions with Squeeze-and-Excitation
 /// attention to estimate the probability of the next tick being UP.
-/// It consumes a sliding window of 32 ticks with 7 features (5 base + 2 frequency proxies).
+/// It consumes a sliding window of 32 ticks with 8 features (5 base + 2 DWT + 1 Volatility Ratio).
 pub struct TransformerModel {
     model: TractModel,
     sequence_length: usize,
@@ -23,7 +23,7 @@ impl TransformerModel {
         let model = tract_onnx::onnx()
             .model_for_path(path.as_ref())
             .with_context(|| format!("failed to read ONNX model from {}", path.as_ref().display()))?
-            .with_input_fact(0, f32::fact([1, sequence_length, 7]).into())
+            .with_input_fact(0, f32::fact([1, sequence_length, 8]).into())
             .context("failed to set model input facts")?
             .into_optimized()
             .context("failed to optimize model graph")?
@@ -44,7 +44,7 @@ impl TransformerModel {
         let start_idx = history.len() - self.sequence_length;
         let sequence = &history[start_idx..];
 
-        let mut data = Vec::with_capacity(self.sequence_length * 7);
+        let mut data = Vec::with_capacity(self.sequence_length * 8);
 
         for (i, tick) in sequence.iter().enumerate() {
             // 1-5: Base features
@@ -54,7 +54,7 @@ impl TransformerModel {
             data.push((tick.ticks_since_reversal as f32).ln_1p());
             data.push(tick.volatility as f32);
 
-            // 6-7: Frequency proxies (Phase 2)
+            // 6-8: Frequency proxies (Phase 2)
             // HF: std of last 2 returns. LF: std of last 4 returns.
             // We use history to access data prior to 'sequence' window if needed.
             let global_idx = start_idx + i;
@@ -76,9 +76,10 @@ impl TransformerModel {
                 data.push(0.0);
                 data.push(0.0);
             }
+            data.push(tick.vol_ratio as f32);
         }
 
-        let input = Tensor::from_shape(&[1, self.sequence_length, 7], &data)?;
+        let input = Tensor::from_shape(&[1, self.sequence_length, 8], &data)?;
 
         let outputs = self.model.run(tvec!(input.into()))?;
         let output = outputs[0].to_array_view::<f32>()?;

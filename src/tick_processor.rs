@@ -28,6 +28,8 @@ pub struct TickSnapshot {
     pub ticks_since_reversal: u32,
     pub dwt_a1: f64,
     pub dwt_d1: f64,
+    pub long_term_volatility: f64,
+    pub vol_ratio: f64,
 }
 
 #[derive(Debug)]
@@ -42,6 +44,8 @@ pub struct TickProcessor {
     ticks_since_reversal: u32,
     return_sum: f64,
     return_sq_sum: f64,
+    long_return_sum: f64,
+    long_return_sq_sum: f64,
 }
 
 impl Default for TickProcessor {
@@ -55,6 +59,7 @@ impl TickProcessor {
     /// Window size for volatility and drift calculation.
     /// ADR 0006 specifies this horizon for short-term responsive trend detection.
     pub const VOLATILITY_WINDOW: usize = 10;
+    pub const LONG_VOLATILITY_WINDOW: usize = 50;
 
     pub fn new() -> Self {
         Self {
@@ -68,6 +73,8 @@ impl TickProcessor {
             ticks_since_reversal: 0,
             return_sum: 0.0,
             return_sq_sum: 0.0,
+            long_return_sum: 0.0,
+            long_return_sq_sum: 0.0,
         }
     }
 
@@ -117,8 +124,19 @@ impl TickProcessor {
             self.return_sq_sum -= expired_return.powi(2);
         }
 
+        if self.len >= Self::LONG_VOLATILITY_WINDOW {
+            let expired_idx =
+                (self.next_index + Self::CAPACITY - Self::LONG_VOLATILITY_WINDOW) % Self::CAPACITY;
+            let expired_next_idx = (expired_idx + 1) % Self::CAPACITY;
+            let expired_return = self.ring[expired_next_idx].price - self.ring[expired_idx].price;
+            self.long_return_sum -= expired_return;
+            self.long_return_sq_sum -= expired_return.powi(2);
+        }
+
         self.return_sum += current_return;
         self.return_sq_sum += current_return.powi(2);
+        self.long_return_sum += current_return;
+        self.long_return_sq_sum += current_return.powi(2);
 
         let (dwt_a1, dwt_d1) = match self.last_price {
             Some(prev) => {
@@ -139,6 +157,8 @@ impl TickProcessor {
             ticks_since_reversal: self.ticks_since_reversal,
             dwt_a1,
             dwt_d1,
+            long_term_volatility: 0.0,
+            vol_ratio: 0.0,
         };
 
         self.ring[self.next_index] = snapshot_without_stats;
@@ -150,10 +170,14 @@ impl TickProcessor {
 
         // Calculate volatility and drift over the available history
         let (volatility, drift, _, _) = self.calculate_stats(dwt_a1, dwt_d1);
+        let long_term_volatility = self.calculate_long_term_volatility();
+        let vol_ratio = volatility / (long_term_volatility + 1e-8);
 
         let mut snapshot = snapshot_without_stats;
         snapshot.volatility = volatility;
         snapshot.drift = drift;
+        snapshot.long_term_volatility = long_term_volatility;
+        snapshot.vol_ratio = vol_ratio;
 
         // Update the ring buffer entry with the calculated stats
         let last_index = (self.next_index + Self::CAPACITY - 1) % Self::CAPACITY;
@@ -174,6 +198,18 @@ impl TickProcessor {
         let std_dev = variance.max(0.0).sqrt();
 
         (std_dev, mean, a1, d1)
+    }
+
+    fn calculate_long_term_volatility(&self) -> f64 {
+        let count = self.len.min(Self::LONG_VOLATILITY_WINDOW);
+        if count < 2 {
+            return 0.0;
+        }
+
+        let n = (count - 1) as f64;
+        let mean = self.long_return_sum / n;
+        let variance = (self.long_return_sq_sum / n) - mean.powi(2);
+        variance.max(0.0).sqrt()
     }
 
     #[cfg(test)]
