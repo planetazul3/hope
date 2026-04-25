@@ -65,11 +65,12 @@ make consolidate
 
 ## Model Configuration
 
-### Transformer V2
-The system defaults to a high-sensitivity Transformer V2 model.
+### GatedTCN V4 (Noise-Resilient)
+The system defaults to a Gated TCN with Haar Wavelet feature extraction.
 - **Requirement**: `TRANSFORMER_SEQUENCE_LENGTH` in `.env` must be set to **32**.
-- **Inference**: Handled by the `tract` engine in Rust using `model.onnx`.
-- **Latency**: Expect ~0.5ms - 1.2ms per inference on modern CPUs.
+- **Features**: Uses 7-dimensional input including Level-1 Haar Approximation and Detail coefficients.
+- **Inference**: Handled by `tract` in Rust. Optimizations include SE channel attention.
+- **Latency**: Sub-ms (<0.2ms) due to convolutional efficiency over attention.
 
 ### Strategy Thresholds
 The `StrategyEngine` uses dynamic modifiers that can be tuned in `.env`:
