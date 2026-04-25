@@ -1,7 +1,7 @@
-# ADR 0010: Transition to Gated TCN with Squeeze-and-Excitation
+# 0011: Gated TCN with Squeeze-and-Excitation
 
-## Status
-Proposed
+*   **Status**: Accepted
+*   **Date**: 2026-04-24
 
 ## Context
 The current Transformer V2 architecture, while competent, presents several challenges in the 1Hz tick-trading environment:

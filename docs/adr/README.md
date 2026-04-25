@@ -21,3 +21,4 @@ This directory stores Architecture Decision Records (ADRs) for `hope`.
 - [0008 - ML Training Pipeline Optimizations](./0008-ml-training-pipeline-optimizations.md)
 - [0009 - Advanced ML Training and Strategy Enhancements](./0009-advanced-ml-training-and-strategy-enhancements.md)
 - [0010 - Structured Logging and Environment-Aware Training](./0010-structured-logging-and-environment-aware-training.md)
+- [0011 - Gated TCN with Squeeze-and-Excitation](./0011-gated-tcn-architecture.md)
