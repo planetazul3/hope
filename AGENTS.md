@@ -34,6 +34,14 @@ Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `sn
 4. **Deploy**: Ensure `model.onnx` is in the project root.
 5. **Config**: Set `TRANSFORMER_SEQUENCE_LENGTH=32` in `.env`.
 
+## ML Engineering Standards
+All model training and export workflows must adhere to these standards:
+- **Optimization**: Training loops must use `ReduceLROnPlateau` and Early Stopping (monitoring validation loss).
+- **Integrity**: Always load the best recorded state dictionary before exporting to ONNX.
+- **Features**: Preprocessing must be vectorized (prefer `pandas`/`numpy` over loops).
+- **Export**: ONNX models must use a static batch size of 1 for Rust integration stability.
+- **Balance**: Loss functions must account for class imbalance via weighting.
+
 ## Testing Guidelines
 Prefer unit tests close to the code they cover with `#[cfg(test)] mod tests`. Name tests by behavior, for example `reconnects_after_socket_error`. Add integration tests under `tests/` only when validating crate-level behavior across modules. New parsing, reconnect, or error-handling logic should ship with tests.
 
