@@ -29,7 +29,7 @@ Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `sn
 ### Machine Learning Workflow
 1. **Data**: Collect ticks with `make collect`.
 2. **Export**: Convert to CSV with `make export`.
-3. **Training**: Upload `data/ticks.csv` and use `notebooks/train_transformer.ipynb` exclusively in a cloud environment (Colab/Kaggle).
+3. **Training**: Upload `data/ticks.csv` to Google Colab or Kaggle and execute `notebooks/train_transformer.ipynb` in a cloud GPU environment. Invoking `scripts/train_fixed.py` or any other Python training script directly on the local machine is prohibited. All training scripts contain runtime guards that abort execution with a clear error message if a cloud environment (Google Colab or Kaggle) is not detected.
 4. **Deploy**: Ensure `model.onnx` is in the project root.
 5. **Config**: Set `TRANSFORMER_SEQUENCE_LENGTH=32` in `.env`.
 

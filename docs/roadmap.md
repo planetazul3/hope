@@ -12,8 +12,9 @@ Status values:
 
 ## Current Stage Summary
 
-- Current active stage: `Stage 9 - ML Pipeline Observability and Portability` (Complete)
-- Overall state: Production-ready modular engine with zero-allocation hot paths, verified backtesting capabilities, and a standardized, observable ML pipeline.
+- Current active stage: `Stage 10 - Noise-Resilient Strategy Evolution` (In Progress — one planned item remaining)
+- Next stage: `Stage 11 - ML Quality and Cloud Enforcement` (Planned)
+- Overall state: Production-ready modular engine with zero-allocation hot paths, verified backtesting capabilities, and a standardized, observable ML pipeline with noise-resilient GatedTCN V4 architecture.
 
 ## Stage 1 - Deterministic Core Foundation
 
@@ -70,11 +71,22 @@ Status: `Done`
 
 Status: `In Progress`
 
-- Transition ML backbone from Transformer to Gated TCN with Squeeze-and-Excitation
-- Implement Level-1 Haar Wavelet (DWT) feature extraction for time-frequency localization
-- Implement two-phase training curriculum: Contrastive Pre-training (SSL) and Supervised Fine-tuning
+- [x] Transition ML backbone from Transformer to Gated TCN with Squeeze-and-Excitation
+- [x] Implement Level-1 Haar Wavelet (DWT) feature extraction for time-frequency localization
+- [x] Implement two-phase training curriculum: Contrastive Pre-training (SSL) and Supervised Fine-tuning
 - [x] Synchronize Python and Rust feature calculation for 8-dimensional DWT inputs
-- Implement Multi-task learning (Auxiliary Volatility Head) for latent space regularization
-- Implement High-Fidelity Backtesting simulation in `src/bin/backtest.rs`
-- Implement INT8 Quantization for ONNX models to optimize L1/L2 cache residency
-- Explore regime-specific scaling and contrastive pre-training on multi-instrument data
+- [x] Implement Multi-task learning (Auxiliary Volatility Head) for latent space regularization
+- [x] Implement High-Fidelity Backtesting simulation in `src/bin/backtest.rs`
+- [x] Implement INT8 Quantization for ONNX models to optimize L1/L2 cache residency
+- [ ] Explore regime-specific scaling and contrastive pre-training on multi-instrument data
+
+## Stage 11 - ML Quality and Cloud Enforcement
+
+Status: `Planned`
+
+- Cloud-only training enforcement with runtime guards in all training entry points
+- Global reproducibility seeding (torch, numpy, random, cudnn deterministic)
+- Persistent cloud checkpoint saving during Phase 2 fine-tuning
+- Decision threshold sweep for empirical boundary selection and `.env` recommendation
+- DataLoader parallel data loading with `num_workers=2` and `pin_memory=True`
+- Comprehensive ML utility unit tests for `hope_ml.common` public API

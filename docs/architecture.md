@@ -20,7 +20,7 @@
 ### GatedTCN V4 (Noise-Resilient Learning)
 The engine utilizes a Gated Temporal Convolutional Network (V4) to identify micro-patterns in tick sequences while suppressing microstructure noise.
 - **Sequence Window**: 32 ticks (~30-45 seconds of market data).
-- **Features**: 8-dimensional input per tick (5 base features + 2 Haar Wavelet DWT coefficients A1/D1).
+- **Features**: 8-dimensional input per tick (5 base features, 2 Haar Wavelet DWT coefficients A1 and D1, and 1 short-to-long-term volatility ratio).
 - **Structure**: 4-layer Causal Dilated Convolutions with Squeeze-and-Excitation (SE) channel attention.
 - **Training**: Two-phase curriculum:
     1. **Contrastive Pre-training**: Learns noise-resilient representations via InfoNCE loss on jittered views.

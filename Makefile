@@ -38,7 +38,9 @@ backtest:
 	$(CARGO) run --bin backtest --offline
 
 train:
-	@echo "Please upload data/ticks.csv and execute the training notebook exclusively in a cloud environment (e.g. Google Colab/Kaggle)."
+	@echo "NOTICE: Invoking scripts/train_fixed.py directly on a local machine is prohibited by project policy (see AGENTS.md)."
+	@echo "Upload data/ticks.csv to Google Colab or Kaggle and execute notebooks/train_transformer.ipynb in a cloud GPU environment."
+	@echo "All training scripts contain runtime guards that abort execution if a cloud environment is not detected."
 
 export:
 	$(PYTHON) scripts/export_db.py

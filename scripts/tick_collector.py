@@ -39,7 +39,7 @@ def insert_batch(conn: sqlite3.Connection, epochs: list, quotes: list) -> int:
         zip(epochs, quotes)
     )
     conn.commit()
-    return cursor.rowcount
+    return conn.execute("SELECT changes()").fetchone()[0]
 
 async def fetch_batch(ws, symbol: str, end_epoch: int = None) -> dict:
     request = {

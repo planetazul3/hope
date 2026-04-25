@@ -4,7 +4,7 @@ use crate::{
 };
 
 pub trait ProbabilityModel {
-    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
+    fn probability_up(&mut self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
 }
 
 const VOLATILITY_EPSILON: f64 = 1e-8;
@@ -15,7 +15,7 @@ pub struct GaussianModel {
 }
 
 impl ProbabilityModel for GaussianModel {
-    fn probability_up(&self, tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+    fn probability_up(&mut self, tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
         use statrs::distribution::{ContinuousCDF, Normal};
 
         if tick.volatility <= 0.0 {
@@ -43,7 +43,7 @@ pub enum AnyModel {
 }
 
 impl ProbabilityModel for AnyModel {
-    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
+    fn probability_up(&mut self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
         match self {
             Self::Gaussian(m) => m.probability_up(tick, history),
             Self::Transformer(m) => m.probability_up(tick, history),
@@ -104,7 +104,7 @@ where
     }
 
     pub fn evaluate(
-        &self,
+        &mut self,
         tick: &TickSnapshot,
         history: &[TickSnapshot],
         state: TradingState,
@@ -179,7 +179,7 @@ mod tests {
     struct ConstantModel;
 
     impl ProbabilityModel for ConstantModel {
-        fn probability_up(&self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+        fn probability_up(&mut self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
             0.6
         }
     }
@@ -198,7 +198,7 @@ mod tests {
             ..Default::default()
         };
 
-        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
+        let mut strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.6);
@@ -219,7 +219,7 @@ mod tests {
             ..Default::default()
         };
 
-        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
+        let mut strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.5);
@@ -243,7 +243,7 @@ mod tests {
         // Case 1: ConstantModel returns 0.6.
         // Base threshold 0.58. Adjusted is 0.63.
         // 0.6 >= 0.58 but 0.6 < 0.63. Should be None.
-        let strategy = StrategyEngine::new(0.58, ConstantModel, 5, 0.05, 0.02, 0.1);
+        let mut strategy = StrategyEngine::new(0.58, ConstantModel, 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
         assert_eq!(decision.signal, None);
 

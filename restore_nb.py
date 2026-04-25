@@ -1,18 +1,14 @@
-{
- "cells": [
-  {
-   "cell_type": "markdown",
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "# Hope: GatedTCN Model V4 - Advanced Training\n\n> **Instructions:** Run all cells sequentially from top to bottom in a fresh runtime. Do not skip cells or re-run individual cells out of order.\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+import json
+import os
+
+nb_path = "notebooks/train_transformer.ipynb"
+with open(nb_path, "r") as f:
+    nb = json.load(f)
+
+new_cells = []
+
+# Cell 1: Environment Detection — cloud-only enforcement, no local fallback
+env_detection_src = [
     "# Environment Detection and Path Setup\n",
     "import os\n",
     "import sys\n",
@@ -45,21 +41,15 @@
     "\n",
     "print(f\"Running on: {env}\")\n",
     "print(f\"Data path: {data_path}\")\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 2: Dependencies
+pip_install_src = [
     "!pip install torch==2.11.0 onnx==1.21.0 numpy==2.4.4 pandas==3.0.2 scikit-learn==1.8.0 tqdm==4.67.3 matplotlib==3.7.0 seaborn==0.12.2 onnxruntime==1.20.1\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 3: Imports
+imports_src = [
     "import torch\n",
     "import torch.nn as nn\n",
     "import torch.onnx\n",
@@ -76,13 +66,10 @@
     "    print(\"Successfully imported hope_ml.common\")\n",
     "except ImportError as e:\n",
     "    print(f\"Import failed: {e}. Make sure the scripts/hope_ml directory is available.\")\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 4: Reproducibility seed (Task 23)
+seed_src = [
     "import random\n",
     "SEED = 42\n",
     "torch.manual_seed(SEED)\n",
@@ -92,13 +79,10 @@
     "torch.backends.cudnn.deterministic = True\n",
     "torch.backends.cudnn.benchmark = False\n",
     "print(f\"Global random seed set to {SEED}\")\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 5: Data Loading
+data_loading_src = [
     "def load_data_from_csv(csv_path, limit=None):\n",
     "    search_paths = [csv_path, \"data/ticks.csv\", \"/content/ticks.csv\", \"/kaggle/input/ticks-csv/ticks.csv\"]\n",
     "    actual_path = None\n",
@@ -114,13 +98,10 @@
     "    print(f\"Loading data from: {actual_path}\")\n",
     "    df = pd.read_csv(actual_path, header=None, names=['epoch', 'quote'], nrows=limit if limit is not None else None)\n",
     "    return df['quote'].values.astype(np.float32)\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 6: Main Training Loop (Tasks 26, 33)
+training_src = [
     "csv_path = data_path\n",
     "seq_len = 32\n",
     "input_dim = 8\n",
@@ -250,13 +231,10 @@
     "\n",
     "if 'best_model' in locals(): model.load_state_dict(best_model)\n",
     "print(f\"Final Best AUC: {best_auc:.4f}\")\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 7: Visualization
+viz_src = [
     "import matplotlib.pyplot as plt\n",
     "import seaborn as sns\n",
     "from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay\n",
@@ -267,13 +245,10 @@
     "    disp.plot(cmap=plt.cm.Blues)\n",
     "    plt.title(\"Confusion Matrix\")\n",
     "    plt.show()\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 8: Threshold Sweep (Task 29)
+threshold_sweep_src = [
     "import numpy as np\n",
     "from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score\n",
     "\n",
@@ -295,13 +270,10 @@
     "\n",
     "print(f\"\\nRecommended DERIV_THRESHOLD={best_thresh:.2f} (F1={best_thresh_f1:.4f})\")\n",
     "print(\"Set this value in your .env file before deploying.\")\n"
-   ]
-  },
-  {
-   "cell_type": "code",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+]
+
+# Cell 9: Export — with best_model reload guard (Task 31)
+export_src = [
     "if 'best_model' not in locals() and 'best_model' not in globals():\n",
     "    _ckpt = torch.load(\"best_model.pth\", weights_only=True)\n",
     "    model.load_state_dict(_ckpt)\n",
@@ -348,32 +320,25 @@
     "    print(\"Deploy model_quantized.onnx\")\n",
     "else:\n",
     "    print(\"WARNING: Quantization failed. Use model.onnx instead.\")\n"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.10.12"
-  },
-  "colab": {
-   "provenance": [],
-   "gpuType": "T4"
-  },
-  "accelerator": "GPU"
- },
- "nbformat": 4,
- "nbformat_minor": 0
-}
+]
+
+def make_cell(src, cell_type="code"):
+    return {"cell_type": cell_type, "metadata": {}, "outputs": [], "source": src}
+
+nb['cells'] = [
+    make_cell(["# Hope: GatedTCN Model V4 - Advanced Training\n\n> **Instructions:** Run all cells sequentially from top to bottom in a fresh runtime. Do not skip cells or re-run individual cells out of order.\n"], "markdown"),
+    make_cell(env_detection_src),
+    make_cell(pip_install_src),
+    make_cell(imports_src),
+    make_cell(seed_src),
+    make_cell(data_loading_src),
+    make_cell(training_src),
+    make_cell(viz_src),
+    make_cell(threshold_sweep_src),
+    make_cell(export_src),
+]
+
+with open(nb_path, "w") as f:
+    json.dump(nb, f, indent=1)
+
+print("Notebook restored and cleaned up successfully.")

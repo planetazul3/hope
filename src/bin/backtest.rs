@@ -11,13 +11,25 @@ use std::io::{BufRead, BufReader};
 fn main() -> Result<()> {
     let config = AppConfig::load().expect("failed to load configuration");
 
-    let csv_path = "data/ticks.csv";
-    let file = File::open(csv_path).expect("failed to open ticks.csv");
+    let csv_path = {
+        let args: Vec<String> = std::env::args().collect();
+        let mut iter = args.iter().skip(1);
+        let mut path = "data/ticks.csv".to_string();
+        while let Some(arg) = iter.next() {
+            if arg == "--csv" {
+                if let Some(p) = iter.next() {
+                    path = p.clone();
+                }
+            }
+        }
+        path
+    };
+    let file = File::open(&csv_path).expect("failed to open ticks.csv");
     let reader = BufReader::new(file);
 
     let mut processor = TickProcessor::new();
     let mut fsm = TradingFsm::new();
-    let mut risk = RiskManager::new(config.max_consecutive_losses); // Match engine default
+    let mut risk = RiskManager::new(config.max_consecutive_losses); // Maximum consecutive losses before entering cooldown, from config
 
     // Task 5: Dynamic model instantiation based on config
     let model = match config.model_type {
@@ -36,7 +48,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let strategy = StrategyEngine::new(
+    let mut strategy = StrategyEngine::new(
         config.probability_threshold,
         model,
         config.min_trend_length,
@@ -84,17 +96,20 @@ fn main() -> Result<()> {
             }
             TradingState::InPosition => {
                 if total_ticks - entry_tick >= config.duration_ticks {
-                    let profit = if signal_dir == SignalDirection::Up {
-                        if quote > entry_price {
-                            stake * payout_ratio
-                        } else {
-                            -stake
+                    let profit = match signal_dir {
+                        SignalDirection::Up => {
+                            if quote > entry_price {
+                                stake * payout_ratio
+                            } else {
+                                -stake
+                            }
                         }
-                    } else {
-                        if quote < entry_price {
-                            stake * payout_ratio
-                        } else {
-                            -stake
+                        SignalDirection::Down => {
+                            if quote < entry_price {
+                                stake * payout_ratio
+                            } else {
+                                -stake
+                            }
                         }
                     };
 

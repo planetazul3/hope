@@ -16,6 +16,7 @@ type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Bo
 pub struct TransformerModel {
     model: TractModel,
     sequence_length: usize,
+    data_buffer: Vec<f32>,
 }
 
 impl TransformerModel {
@@ -33,10 +34,11 @@ impl TransformerModel {
         Ok(Self {
             model,
             sequence_length,
+            data_buffer: Vec::with_capacity(sequence_length * 8),
         })
     }
 
-    pub fn predict(&self, history: &[TickSnapshot]) -> Result<f64> {
+    pub fn predict(&mut self, history: &[TickSnapshot]) -> Result<f64> {
         if history.len() < self.sequence_length {
             return Err(anyhow!("insufficient history for GatedTCN inference"));
         }
@@ -44,15 +46,17 @@ impl TransformerModel {
         let start_idx = history.len() - self.sequence_length;
         let sequence = &history[start_idx..];
 
-        let mut data = Vec::with_capacity(self.sequence_length * 8);
+        self.data_buffer.clear();
 
         for (i, tick) in sequence.iter().enumerate() {
             // 1-5: Base features
-            data.push(tick.direction.as_i8() as f32);
-            data.push((tick.return_magnitude as f32) / (tick.volatility as f32 + 1e-8));
-            data.push((tick.streak as f32).ln_1p());
-            data.push((tick.ticks_since_reversal as f32).ln_1p());
-            data.push(tick.volatility as f32);
+            self.data_buffer.push(tick.direction.as_i8() as f32);
+            self.data_buffer
+                .push((tick.return_magnitude as f32) / (tick.volatility as f32 + 1e-8));
+            self.data_buffer.push((tick.streak as f32).ln_1p());
+            self.data_buffer
+                .push((tick.ticks_since_reversal as f32).ln_1p());
+            self.data_buffer.push(tick.volatility as f32);
 
             // 6: Haar A1 approximation normalized by price
             // 7: Haar D1 detail coefficient
@@ -71,16 +75,16 @@ impl TransformerModel {
                 let d1 = (x_t - x_prev) / 2.0_f64.sqrt();
 
                 // Normalizing A1 by price level to keep it scale-invariant
-                data.push((a1 / x_t) as f32);
-                data.push(d1 as f32);
+                self.data_buffer.push((a1 / x_t) as f32);
+                self.data_buffer.push(d1 as f32);
             } else {
-                data.push(0.0);
-                data.push(0.0);
+                self.data_buffer.push(0.0);
+                self.data_buffer.push(0.0);
             }
-            data.push(tick.vol_ratio as f32);
+            self.data_buffer.push(tick.vol_ratio as f32);
         }
 
-        let input = Tensor::from_shape(&[1, self.sequence_length, 8], &data)?;
+        let input = Tensor::from_shape(&[1, self.sequence_length, 8], &self.data_buffer)?;
 
         let outputs = self.model.run(tvec!(input.into()))?;
         let output = outputs[0].to_array_view::<f32>()?;
@@ -96,7 +100,7 @@ impl TransformerModel {
 }
 
 impl ProbabilityModel for TransformerModel {
-    fn probability_up(&self, _tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
+    fn probability_up(&mut self, _tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
         match self.predict(history) {
             Ok(p) => p,
             Err(err) => {

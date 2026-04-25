@@ -61,3 +61,4 @@ antigravity_venv/
 *_merged_sources*.txt
 data/ticks.csv
 data/tick_store.db
+venv_pytest/

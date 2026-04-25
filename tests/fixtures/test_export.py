@@ -1,5 +1,10 @@
+import os
+import sys
+import unittest
+
 import torch
 import torch.nn as nn
+
 
 class SimpleModel(nn.Module):
     def __init__(self):
@@ -13,11 +18,26 @@ class SimpleModel(nn.Module):
         x = self.fc(x)
         return self.sigmoid(x)
 
-def export():
-    model = SimpleModel()
-    dummy_input = torch.randn(1, 16, 5)
-    torch.onnx.export(model, dummy_input, "tests/fixtures/test_model.onnx")
-    print("Exported simple model to tests/fixtures/test_model.onnx")
+
+class TestModelExport(unittest.TestCase):
+    def test_simple_model_exports_valid_onnx(self):
+        import onnxruntime
+        import numpy as np
+
+        model = SimpleModel()
+        dummy_input = torch.randn(1, 16, 5)
+        export_path = "tests/fixtures/test_model.onnx"
+        torch.onnx.export(model, dummy_input, export_path)
+
+        sess = onnxruntime.InferenceSession(export_path)
+        test_input = np.random.randn(1, 16, 5).astype(np.float32)
+        outputs = sess.run(None, {sess.get_inputs()[0].name: test_input})
+        output = outputs[0]
+
+        self.assertEqual(output.shape, (1, 1))
+        self.assertGreaterEqual(float(output[0, 0]), 0.0)
+        self.assertLessEqual(float(output[0, 0]), 1.0)
+
 
 if __name__ == "__main__":
-    export()
+    unittest.main()

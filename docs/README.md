@@ -21,6 +21,13 @@ Detailed justifications for technical choices:
 -   [ADR 0005: Legacy Deriv WebSocket API Usage](adr/0005-stay-on-legacy-deriv-websocket-api-until-explicitly-replaced.md)
 -   [ADR 0006: Gaussian Probability Model](adr/0006-gaussian-probability-model.md)
 -   [ADR 0007: Neural Inference Integration](adr/0007-neural-inference-integration.md)
+-   [ADR 0008: ML Training Pipeline Optimizations](adr/0008-ml-training-pipeline-optimizations.md)
+-   [ADR 0009: Advanced ML Training and Strategy Enhancements](adr/0009-advanced-ml-training-and-strategy-enhancements.md)
+-   [ADR 0010: Structured Logging and Environment-Aware Training](adr/0010-structured-logging-and-environment-aware-training.md)
+-   [ADR 0011: Gated TCN with Squeeze-and-Excitation](adr/0011-gated-tcn-architecture.md)
+-   [ADR 0012: Noise-Resilient Training with DWT and Contrastive Pre-training](adr/0012-noise-resilient-training.md)
+-   [ADR 0013: High-Fidelity Backtesting Methodology](adr/0013-high-fidelity-backtesting.md)
+-   [ADR 0014: Cloud-Only Training Enforcement](adr/0014-cloud-only-training-enforcement.md)
 
 ### Reference
 -   [Deriv API Integration Notes](reference/deriv-api.md)

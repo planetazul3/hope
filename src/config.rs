@@ -180,11 +180,18 @@ fn load_dotenv(path: &str) -> Result<HashMap<String, String>> {
     let mut env_map = HashMap::new();
     let dotenv_path = Path::new(path);
     if !dotenv_path.exists() {
+        tracing::info!(
+            "No .env file found at '{}'; relying on environment variables alone",
+            path
+        );
         return Ok(env_map);
     }
 
     let contents = fs::read_to_string(dotenv_path)
         .with_context(|| format!("failed to read {}", dotenv_path.display()))?;
+    if let Ok(abs) = dotenv_path.canonicalize() {
+        tracing::debug!("Loaded .env from {}", abs.display());
+    }
 
     for raw_line in contents.lines() {
         let line = raw_line.trim();
@@ -206,9 +213,10 @@ fn load_dotenv(path: &str) -> Result<HashMap<String, String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
-    #[serial_test::serial]
+    #[serial]
     fn parses_environment_case_insensitively() {
         std::env::set_var("DERIV_ENVIRONMENT", "real");
         std::env::set_var("DERIV_REAL_TOKEN", "token");
