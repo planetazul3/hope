@@ -82,20 +82,31 @@ impl TransformerModel {
             if global_idx >= 3 {
                 let mut sum = 0.0;
                 let mut vals = [0.0; 4];
+                let mut valid = true;
                 for j in 0..4 {
+                    if global_idx < j + 1 {
+                        valid = false;
+                        break;
+                    }
                     vals[j] = history[global_idx - j].price - history[global_idx - j - 1].price;
                     sum += vals[j];
                 }
-                let mean = sum / 4.0;
-                let mut var_sum = 0.0;
-                for v in vals {
-                    var_sum += (v - mean).powi(2);
+                
+                if valid {
+                    let mean = sum / 4.0;
+                    let mut var_sum = 0.0;
+                    for v in vals {
+                        var_sum += (v - mean).powi(2);
+                    }
+                    let std_lf = (var_sum / 4.0).sqrt();
+                    data.push(std_lf as f32);
+                } else {
+                    data.push(0.0);
                 }
-                let std_lf = (var_sum / 4.0).sqrt();
-                data.push(std_lf as f32);
             } else {
                 data.push(0.0);
             }
+
         }
 
         let input = Tensor::from_shape(&[1, self.sequence_length, 7], &data)?;

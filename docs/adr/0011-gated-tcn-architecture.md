@@ -24,3 +24,8 @@ We will transition the primary ML backbone from a Transformer to a **Gated Tempo
 * **Lower Latency**: TCNs map more efficiently to `tract-onnx` primitives, targeting <100µs inference.
 * **Training Stability**: The reduced parameter count (approx. 30K vs 100K) reduces the risk of overfitting.
 * **Compatibility**: All operations remain standard ONNX ops, ensuring no breakage in the Rust runtime.
+* **Backtest Results (2026-04-24)**: 
+    - Dataset: `ticks.csv` (122k samples)
+    - AUC: 0.5055 (Validation)
+    - Win Rate: 49.94% (Backtest at 0.51 threshold)
+    - Analysis: The architecture is stable and provides sub-ms inference, but the raw signal remains close to noise. Future iterations should focus on contrastive pre-training and regime-specific scaling.

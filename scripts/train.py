@@ -28,7 +28,6 @@ class GatedTCNBlock(nn.Module):
         self.conv_gate = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
         
         self.proj = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
-        self.norm = nn.LayerNorm(out_channels)
 
     def forward(self, x):
         res = self.proj(x)
@@ -38,16 +37,13 @@ class GatedTCNBlock(nn.Module):
         g = torch.sigmoid(self.conv_gate(x_pad))
         x = f * g
         
-        x = x + res
-        # Transpose for LayerNorm: (B, C, L) -> (B, L, C)
-        x = self.norm(x.transpose(1, 2)).transpose(1, 2)
-        return x
+        return x + res
 
 class SEModule(nn.Module):
     """Squeeze-and-Excitation Module."""
     def __init__(self, channels, reduction=4):
         super(SEModule, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        # Use simple mean instead of AdaptiveAvgPool1d for tract stability
         self.fc = nn.Sequential(
             nn.Linear(channels, channels // reduction, bias=False),
             nn.ReLU(inplace=True),
@@ -56,10 +52,10 @@ class SEModule(nn.Module):
         )
 
     def forward(self, x):
-        b, c, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1)
-        return x * y.expand_as(x)
+        # b, c, l
+        y = torch.mean(x, dim=2)
+        y = self.fc(y).view(y.size(0), y.size(1), 1)
+        return x * y
 
 class GatedTCN(nn.Module):
     """Gated TCN with SE Attention and Multi-task Heads."""
