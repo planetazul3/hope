@@ -109,6 +109,7 @@ impl Engine {
                 config.min_trend_length,
                 config.strategy_volatility_penalty,
                 config.strategy_momentum_reward,
+                config.strategy_min_return_ratio,
             ),
             execution: ExecutionEngine::new(config.min_api_interval, config.max_tick_latency),
             risk: RiskManager::new(3),
@@ -599,6 +600,7 @@ mod tests {
             min_trend_length: 5,
             strategy_volatility_penalty: 0.05,
             strategy_momentum_reward: 0.02,
+            strategy_min_return_ratio: 0.1,
         }
     }
 

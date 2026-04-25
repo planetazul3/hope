@@ -38,6 +38,7 @@ fn main() {
         config.min_trend_length,
         config.strategy_volatility_penalty,
         config.strategy_momentum_reward,
+        config.strategy_min_return_ratio,
     );
 
     let mut total_trades = 0;

@@ -81,9 +81,8 @@ pub struct StrategyEngine<M> {
     min_trend_length: u32,
     volatility_penalty: f64,
     momentum_reward: f64,
+    min_return_ratio: f64,
 }
-
-const MIN_RETURN_RATIO: f64 = 0.1;
 
 impl<M> StrategyEngine<M>
 where
@@ -95,6 +94,7 @@ where
         min_trend_length: u32,
         volatility_penalty: f64,
         momentum_reward: f64,
+        min_return_ratio: f64,
     ) -> Self {
         Self {
             threshold,
@@ -102,6 +102,7 @@ where
             min_trend_length,
             volatility_penalty,
             momentum_reward,
+            min_return_ratio,
         }
     }
 
@@ -128,7 +129,7 @@ where
         }
 
         // Return-magnitude filter: avoid noise-induced false signals
-        if tick.return_magnitude < tick.volatility * MIN_RETURN_RATIO {
+        if tick.return_magnitude < tick.volatility * self.min_return_ratio {
             return StrategyDecision {
                 probability_up: 0.5,
                 signal: None,
@@ -191,7 +192,7 @@ mod tests {
             ..Default::default()
         };
 
-        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02);
+        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.6);
@@ -212,7 +213,7 @@ mod tests {
             ..Default::default()
         };
 
-        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02);
+        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.5);
@@ -236,7 +237,7 @@ mod tests {
         // Case 1: ConstantModel returns 0.6.
         // Base threshold 0.58. Adjusted is 0.63.
         // 0.6 >= 0.58 but 0.6 < 0.63. Should be None.
-        let strategy = StrategyEngine::new(0.58, ConstantModel, 5, 0.05, 0.02);
+        let strategy = StrategyEngine::new(0.58, ConstantModel, 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
         assert_eq!(decision.signal, None);
 

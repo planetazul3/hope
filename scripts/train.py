@@ -6,7 +6,8 @@ import pandas as pd
 import numpy as np
 import os
 import copy
-from sklearn.metrics import roc_auc_score, accuracy_score
+from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score
+from torch.utils.data import DataLoader, TensorDataset
 
 class SimpleTransformer(nn.Module):
     def __init__(self, input_dim=5, d_model=32, nhead=4, num_layers=3, max_seq_len=32, dropout=0.1):
@@ -40,7 +41,6 @@ class SimpleTransformer(nn.Module):
         x = x + self.pe[:, :x.size(1), :]
         x = self.dropout(x)
         
-        # Task 4 from previous audit: Causal attention mask
         if mask is None:
             sz = x.size(1)
             mask = nn.Transformer.generate_square_subsequent_mask(sz).to(x.device)
@@ -92,7 +92,6 @@ def prepare_features(prices, seq_len=32):
         
     vol = pd.Series(returns).rolling(window=20, min_periods=1).std().fillna(0).values
     
-    # Task 1 from previous audit: Feature normalization
     norm_magnitudes = magnitudes / (vol + 1e-8)
     norm_streaks = np.log1p(np.array(streaks, dtype=np.float32))
     norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
@@ -106,9 +105,12 @@ def prepare_features(prices, seq_len=32):
         
     return torch.from_numpy(np.array(x, dtype=np.float32)), torch.from_numpy(np.array(y, dtype=np.float32)).unsqueeze(1)
 
-# Task 4: Focal Loss implementation
-def focal_loss(output, target, pos_weight, gamma=2.0):
-    bce_loss = nn.functional.binary_cross_entropy(output, target, reduction='none')
+# Task 3: Focal Loss with Label Smoothing
+def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
+    # Apply label smoothing
+    target_smooth = target * (1 - smoothing) + 0.5 * smoothing
+    
+    bce_loss = nn.functional.binary_cross_entropy(output, target_smooth, reduction='none')
     pt = torch.where(target == 1, output, 1 - output)
     weight = torch.where(target == 1, pos_weight, torch.tensor(1.0).to(output.device))
     loss = weight * (1 - pt) ** gamma * bce_loss
@@ -132,6 +134,14 @@ def train_and_export():
     x_train, x_val = x_all[:split_idx], x_all[split_idx:]
     y_train, y_val = y_all[:split_idx], y_all[split_idx:]
 
+    # Task 2: DataLoaders
+    train_dataset = TensorDataset(x_train, y_train)
+    val_dataset = TensorDataset(x_val, y_val)
+    
+    batch_size = 64
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
     num_pos = torch.sum(y_train).item()
     num_neg = len(y_train) - num_pos
     pos_weight_val = (num_neg / num_pos) if num_pos > 0 else 1.0
@@ -142,8 +152,6 @@ def train_and_export():
 
     model = SimpleTransformer(input_dim=input_dim, max_seq_len=seq_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
-    
-    # Task 5: Scheduler based on ROC-AUC (max mode)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     
     best_val_auc = 0.0
@@ -152,29 +160,26 @@ def train_and_export():
     patience_counter = 0
 
     print(f"Training V2 (CSV-based) on {len(x_train)} samples...")
-    batch_size = 64
     for epoch in range(100):
         model.train()
         train_loss = 0
         
-        # Task 1: Shuffle dataset per epoch
-        perm = torch.randperm(len(x_train))
-        x_train_shuffled = x_train[perm]
-        y_train_shuffled = y_train[perm]
-        
-        for i in range(0, len(x_train), batch_size):
-            batch_x = x_train_shuffled[i:i+batch_size].to(device)
-            batch_y = y_train_shuffled[i:i+batch_size].to(device)
+        # Task 2: Iterate over DataLoader
+        for batch_x, batch_y in train_loader:
+            batch_x, batch_y = batch_x.to(device), batch_y.to(device)
             
-            # Task 3: Gaussian noise injection (data augmentation)
+            # Data augmentation: noise
             noise = torch.randn_like(batch_x) * 0.01
             batch_x = batch_x + noise
             
             optimizer.zero_grad()
             output = model(batch_x)
-            # Task 4: Use Focal Loss
             loss = focal_loss(output, batch_y, torch.tensor(pos_weight_val).to(device))
             loss.backward()
+            
+            # Task 1: Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            
             optimizer.step()
             train_loss += loss.item() * len(batch_x)
             
@@ -184,9 +189,8 @@ def train_and_export():
         all_targets = []
         
         with torch.no_grad():
-            for i in range(0, len(x_val), batch_size):
-                batch_x = x_val[i:i+batch_size].to(device)
-                batch_y = y_val[i:i+batch_size].to(device)
+            for batch_x, batch_y in val_loader:
+                batch_x, batch_y = batch_x.to(device), batch_y.to(device)
                 output = model(batch_x)
                 loss = focal_loss(output, batch_y, torch.tensor(pos_weight_val).to(device))
                 val_loss += loss.item() * len(batch_x)
@@ -197,13 +201,17 @@ def train_and_export():
         avg_train_loss = train_loss / len(x_train)
         avg_val_loss = val_loss / len(x_val)
         
-        # Task 2: Calculate ROC-AUC and Accuracy
         val_auc = roc_auc_score(all_targets, all_preds)
-        val_acc = accuracy_score(all_targets, np.array(all_preds) > 0.5)
+        val_preds_binary = np.array(all_preds) > 0.5
+        val_acc = accuracy_score(all_targets, val_preds_binary)
         
-        print(f"Epoch {epoch}, Loss: T={avg_train_loss:.4f} V={avg_val_loss:.4f}, AUC: {val_auc:.4f}, Acc: {val_acc:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}")
+        # Task 4: Expanded metrics
+        val_precision = precision_score(all_targets, val_preds_binary, zero_division=0)
+        val_recall = recall_score(all_targets, val_preds_binary, zero_division=0)
+        val_f1 = f1_score(all_targets, val_preds_binary, zero_division=0)
         
-        # Task 5: Early stopping and checkpointing based on AUC
+        print(f"Epoch {epoch}, Loss: T={avg_train_loss:.4f} V={avg_val_loss:.4f}, AUC: {val_auc:.4f}, Acc: {val_acc:.4f}, P: {val_precision:.4f}, R: {val_recall:.4f}, F1: {val_f1:.4f}")
+        
         scheduler.step(val_auc)
         
         if val_auc > best_val_auc:
@@ -222,7 +230,6 @@ def train_and_export():
         model.load_state_dict(best_model_state)
         print(f"Loaded best model with Val AUC: {best_val_auc:.4f}")
 
-    # Task 7 from previous audit: Static ONNX export (Batch size 1)
     model.eval()
     dummy_input = torch.randn(1, seq_len, input_dim).to(device)
     torch.onnx.export(

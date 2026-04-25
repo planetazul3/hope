@@ -39,6 +39,7 @@ pub struct AppConfig {
     pub min_trend_length: u32,
     pub strategy_volatility_penalty: f64,
     pub strategy_momentum_reward: f64,
+    pub strategy_min_return_ratio: f64,
 }
 
 impl AppConfig {
@@ -129,6 +130,11 @@ impl AppConfig {
                 0.05,
             )?,
             strategy_momentum_reward: parse_or_default(&env_map, "STRATEGY_MOMENTUM_REWARD", 0.02)?,
+            strategy_min_return_ratio: parse_or_default(
+                &env_map,
+                "STRATEGY_MIN_RETURN_RATIO",
+                0.1,
+            )?,
         })
     }
 }

@@ -75,6 +75,7 @@ The system defaults to a high-sensitivity Transformer V2 model.
 The `StrategyEngine` uses dynamic modifiers that can be tuned in `.env`:
 - `STRATEGY_MOMENTUM_REWARD`: Reduction in threshold when `streak >= 4` (Default: 0.02).
 - `STRATEGY_VOLATILITY_PENALTY`: Increase in threshold when volatility is low (Default: 0.05).
+- `STRATEGY_MIN_RETURN_RATIO`: Minimum return magnitude as a ratio of volatility (Default: 0.1).
 
 ## Troubleshooting
 -   **Invalid State Transition**: Indicates a race condition was blocked by the FSM. The engine resets to `Idle`.

@@ -18,9 +18,14 @@ We have implemented the following enhancements:
 5.  **Configurable Strategy Modifiers**: Refactored the `StrategyEngine` to accept `volatility_penalty` and `momentum_reward` as parameters, moving away from hardcoded values.
 6.  **Enhanced Feature Preprocessing**: Implemented robust normalization (`log1p` on streaks/reversals and magnitude/volatility scaling) across both Python and Rust environments.
 
+7. **Gradient Clipping**: Added norm clipping (1.0) to prevent exploding gradients during Transformer training.
+8. **Label Smoothing**: Integrated smoothing (0.05) into Focal Loss to reduce model overconfidence.
+9. **Native Batching**: Switched to PyTorch `DataLoader` and `TensorDataset` for standardized data handling.
+10. **Rich Metrics**: Expanded validation monitoring to include Accuracy, Precision, Recall, and F1-Score.
+
 ## Consequences
 
-*   **Robustness**: The model is less likely to overfit due to data augmentation and causal constraints.
-*   **Sensitivity**: Focal Loss improves the detection of rare but profitable market shifts.
-*   **Flexibility**: Operators can now tune momentum rewards and volatility penalties via environment variables (`STRATEGY_MOMENTUM_REWARD`, `STRATEGY_VOLATILITY_PENALTY`) without recompiling the code.
-*   **Visibility**: Training logs now include AUC and accuracy metrics, providing better insight into model quality.
+*   **Robustness**: The model is less likely to overfit due to data augmentation, causal constraints, and label smoothing.
+*   **Stability**: Gradient clipping ensures more stable convergence during training.
+*   **Flexibility**: Operators can now tune momentum rewards, volatility penalties, and return ratios via environment variables (`STRATEGY_MOMENTUM_REWARD`, `STRATEGY_VOLATILITY_PENALTY`, `STRATEGY_MIN_RETURN_RATIO`) without recompiling the code.
+*   **Visibility**: Training logs now include a comprehensive suite of classification metrics, providing deeper insight into model performance.
