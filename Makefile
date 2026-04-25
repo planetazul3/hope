@@ -37,7 +37,7 @@ export:
 	python3 scripts/export_db.py
 
 collect:
-	python3 scripts/tick_collector.py --hours 24
+	$(PYTHON) scripts/tick_collector.py --hours 24
 
 consolidate:
 	python3 consolidate_project_sources.py
@@ -47,4 +47,6 @@ setup:
 
 clean:
 	rm -f tick_audit.log *_merged_sources.txt data/ticks.csv
+	cargo clean
+csv
 	cargo clean

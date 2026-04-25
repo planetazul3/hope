@@ -52,7 +52,7 @@ fn main() -> Result<()> {
     let mut signal_dir = SignalDirection::Up;
 
     let stake = config.stake;
-    let payout_ratio = 0.95; // Standard payout
+    let payout_ratio = config.payout_ratio;
     let mut history_buffer = [TickSnapshot::default(); 64];
 
     for line in reader.lines() {

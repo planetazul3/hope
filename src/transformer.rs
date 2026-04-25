@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Context, Result};
-use std::cell::RefCell;
 use std::path::Path;
 use tracing::error;
 use tract_onnx::prelude::*;
@@ -17,7 +16,6 @@ type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Bo
 pub struct TransformerModel {
     model: TractModel,
     sequence_length: usize,
-    features_buffer: RefCell<Vec<f32>>,
 }
 
 impl TransformerModel {
@@ -35,7 +33,6 @@ impl TransformerModel {
         Ok(Self {
             model,
             sequence_length,
-            features_buffer: RefCell::new(Vec::with_capacity(sequence_length * 7)),
         })
     }
 
@@ -47,8 +44,7 @@ impl TransformerModel {
         let start_idx = history.len() - self.sequence_length;
         let sequence = &history[start_idx..];
 
-        let mut data = self.features_buffer.borrow_mut();
-        data.clear();
+        let mut data = Vec::with_capacity(self.sequence_length * 7);
 
         for (i, tick) in sequence.iter().enumerate() {
             // 1-5: Base features

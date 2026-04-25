@@ -1,6 +1,7 @@
 import sqlite3
 import csv
 import sys
+import argparse
 
 def export_ticks(db_path, csv_path):
     try:
@@ -19,4 +20,9 @@ def export_ticks(db_path, csv_path):
         sys.exit(1)
 
 if __name__ == "__main__":
-    export_ticks("data/tick_store.db", "data/ticks.csv")
+    parser = argparse.ArgumentParser(description="Export Deriv ticks from SQLite to CSV")
+    parser.add_argument("--db", default="data/tick_store.db", help="SQLite DB path")
+    parser.add_argument("--csv", default="data/ticks.csv", help="Output CSV path")
+    args = parser.parse_args()
+    
+    export_ticks(args.db, args.csv)

@@ -1,6 +1,6 @@
 # ADR 0007: Neural Inference Integration
 
-- Status: Accepted
+- Status: Superseded by [ADR 0011](./0011-gated-tcn-architecture.md) and [ADR 0012](./0012-noise-resilient-training.md)
 - Date: 2026-04-24
 
 ## Context
@@ -29,14 +29,16 @@ Integrate a neural inference runtime into the Rust engine to support non-paramet
 - **Precision**: The model should provide higher edge by learning non-linear dependencies in tick sequences.
 - **Portability**: The model must be trained externally (Python/PyTorch) using decoupled CSV data (`data/ticks.csv`) to support cloud-based training (Colab/Kaggle) and local verification.
 
-### V2 Architecture Specification (Updated 2026-04-24)
-To capture fractal dependencies in synthetic indices, the model has been evolved to the following high-sensitivity configuration:
-- **Sequence Length**: 32 ticks (increased from 16 for better temporal context).
-- **Architecture**: 3-layer Transformer Encoder.
-- **Attention**: 4-head Multi-Head Attention.
-- **Embedding Dimension**: 32 (`d_model`).
-- **Regularization**: Sinusoidal Positional Encoding, Layer Normalization, and 10% Dropout.
-- **Pooling**: Global Average Pooling across the sequence dimension for stable representation.
+### ~~V2 Architecture Specification (Updated 2026-04-24)~~ [OBSOLETE]
+*Note: This architecture has been replaced by the Gated TCN V4 specified in ADR 0011.*
+
+~~To capture fractal dependencies in synthetic indices, the model has been evolved to the following high-sensitivity configuration:~~
+- ~~**Sequence Length**: 32 ticks (increased from 16 for better temporal context).~~
+- ~~**Architecture**: 3-layer Transformer Encoder.~~
+- ~~**Attention**: 4-head Multi-Head Attention.~~
+- ~~**Embedding Dimension**: 32 (`d_model`).~~
+- ~~**Regularization**: Sinusoidal Positional Encoding, Layer Normalization, and 10% Dropout.~~
+- ~~**Pooling**: Global Average Pooling across the sequence dimension for stable representation.~~
 
 ## Requirements for TickProcessor
 ...

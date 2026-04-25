@@ -16,8 +16,8 @@ class SimpleModel(nn.Module):
 def export():
     model = SimpleModel()
     dummy_input = torch.randn(1, 16, 5)
-    torch.onnx.export(model, dummy_input, "model.onnx")
-    print("Exported simple model to model.onnx")
+    torch.onnx.export(model, dummy_input, "tests/fixtures/test_model.onnx")
+    print("Exported simple model to tests/fixtures/test_model.onnx")
 
 if __name__ == "__main__":
     export()

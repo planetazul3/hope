@@ -143,7 +143,7 @@ async def collect_ticks(symbol: str, target_count: int, db_path: str, hours: flo
         print(f"\nSummary: Batches: {batch_num}, new ticks inserted: {total_inserted:,}, "
               f"total in DB: {final_count:,}")
 
-def main():
+async def main_async():
     parser = argparse.ArgumentParser(description="Deriv tick collector")
     parser.add_argument("--symbol", default="1HZ75V", help="Deriv symbol (default: 1HZ75V)")
     parser.add_argument("--count", type=int, default=86400, help="Target ticks (default: 86400 for 24h)")
@@ -151,26 +151,15 @@ def main():
     parser.add_argument("--hours", type=float, default=24, help="Last N hours")
     args = parser.parse_args()
 
-    # Use a loop that can be interrupted
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # Define a handler for signals
-    def stop_loop():
-        for task in asyncio.all_tasks(loop):
-            task.cancel()
-
     try:
-        loop.run_until_complete(collect_ticks(
+        await collect_ticks(
             symbol=args.symbol,
             target_count=args.count,
             db_path=args.db,
             hours=args.hours,
-        ))
+        )
     except KeyboardInterrupt:
         pass
-    finally:
-        loop.close()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())

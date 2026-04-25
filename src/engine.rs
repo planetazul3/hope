@@ -20,14 +20,15 @@ use crate::{
     },
 };
 
-// Audit summary:
-// - The original repository had a single websocket reader that forwarded raw text frames.
-// - There was no FSM, no fixed-size tick processor, no rate limiting, and no risk controls.
-// - The websocket task could await on bounded channel sends, which can block frame handling.
-// - Trade state could not be synchronized because no typed buy/open-contract updates existed.
+// Audit summary (RESOLVED):
+// - Implemented a robust WebSocket handler with deterministic routing and non-blocking sends.
+// - Added a Finite State Machine (FSM) for strict trade lifecycle management.
+// - Integrated a high-fidelity TickProcessor with dynamic history buffering.
+// - Established multi-layered risk controls and rate limiting (ExecutionEngine).
+// - Synchronized trade state via typed OpenContract and BuyAccepted updates.
 
 pub async fn run(config: AppConfig) -> Result<()> {
-    let tick_logger = TickLogger::start("tick_audit.log", 4096);
+    let tick_logger = TickLogger::start(&config.tick_audit_log_path, 4096);
     let (event_tx, mut event_rx) = mpsc::channel::<WebSocketEvent>(config.inbound_queue_capacity);
     let (command_tx, command_rx) =
         mpsc::channel::<WebSocketCommand>(config.outbound_queue_capacity);
@@ -69,7 +70,7 @@ struct Engine {
     pending_subscription_req_id: Option<u32>,
     pending_probability: Option<f64>,
     req_id_counter: Arc<AtomicU32>,
-    history_buffer: [TickSnapshot; 64], // Increased to accommodate max CAPACITY
+    history_buffer: Vec<TickSnapshot>,
     balance: f64,
 }
 
@@ -113,7 +114,6 @@ impl Engine {
             ),
             execution: ExecutionEngine::new(config.min_api_interval, config.max_tick_latency),
             risk: RiskManager::new(3),
-            config,
             tick_processor: TickProcessor::new(),
             fsm: TradingFsm::new(),
             cooldown_remaining: 0,
@@ -128,7 +128,8 @@ impl Engine {
             pending_subscription_req_id: None,
             pending_probability: None,
             req_id_counter,
-            history_buffer: [TickSnapshot::default(); 64],
+            history_buffer: vec![TickSnapshot::default(); config.transformer_sequence_length.max(64)],
+            config,
             balance: 0.0,
         }
     }
@@ -601,6 +602,8 @@ mod tests {
             strategy_volatility_penalty: 0.05,
             strategy_momentum_reward: 0.02,
             strategy_min_return_ratio: 0.1,
+            tick_audit_log_path: "/dev/null".to_string(),
+            payout_ratio: 0.95,
         }
     }
 

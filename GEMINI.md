@@ -43,12 +43,13 @@ Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `sn
 
 ## ML Engineering Standards
 All model training and export workflows must adhere to these standards:
-- **Optimization**: Training loops must use `ReduceLROnPlateau` and Early Stopping (monitoring validation ROC-AUC).
+- **Architecture**: Use Gated TCN with Causal Dilated Convolutions and SE Attention (V4).
+- **Optimization**: Training loops must use a two-phase curriculum starting with Contrastive Pre-training (InfoNCE) and then Supervised Fine-tuning with Focal Loss and Volatility MSE, using ReduceLROnPlateau and warmup scheduler.
+- **Features**: Preprocessing must include 5 base features + 2 Haar Wavelet DWT coefficients (A1/D1).
+- **Batching**: Use PyTorch `DataLoader` and `TensorDataset`.
 - **Integrity**: Always load the best recorded state dictionary before exporting to ONNX.
-- **Features**: Preprocessing must be vectorized (prefer `pandas`/`numpy` over loops) and include robust normalization (`log1p`, scaled magnitude).
-- **Architecture**: Transformers must use causal masking in the forward pass.
-- **Export**: ONNX models must use a static batch size of 1 for Rust integration stability.
-- **Balance**: Loss functions must account for class imbalance via Focal Loss.
+- **Export**: ONNX models must use a static batch size of 1 and exclude auxiliary heads.
+- **Balance**: Loss functions must use Focal Loss with Label Smoothing.
 
 ## Testing Guidelines
 Prefer unit tests close to the code they cover with `#[cfg(test)] mod tests`. Name tests by behavior, for example `reconnects_after_socket_error`. Add integration tests under `tests/` only when validating crate-level behavior across modules. New parsing, reconnect, or error-handling logic should ship with tests.

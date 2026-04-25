@@ -68,7 +68,7 @@ make consolidate
 ### GatedTCN V4 (Noise-Resilient)
 The system defaults to a Gated TCN with Haar Wavelet feature extraction.
 - **Requirement**: `TRANSFORMER_SEQUENCE_LENGTH` in `.env` must be set to **32**.
-- **Features**: Uses 7-dimensional input including Level-1 Haar Approximation and Detail coefficients.
+- **Features**: 7-dimensional input including Level-1 Haar Approximation and Detail coefficients.
 - **Inference**: Handled by `tract` in Rust. Optimizations include SE channel attention.
 - **Latency**: Sub-ms (<0.2ms) due to convolutional efficiency over attention.
 

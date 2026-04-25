@@ -7,15 +7,6 @@ pub trait ProbabilityModel {
     fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ConstantModel;
-
-impl ProbabilityModel for ConstantModel {
-    fn probability_up(&self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
-        0.6
-    }
-}
-
 const VOLATILITY_EPSILON: f64 = 1e-8;
 
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +39,6 @@ impl ProbabilityModel for GaussianModel {
 
 #[allow(dead_code)]
 pub enum AnyModel {
-    Constant(ConstantModel),
     Gaussian(GaussianModel),
     Transformer(Box<crate::transformer::TransformerModel>),
 }
@@ -56,7 +46,6 @@ pub enum AnyModel {
 impl ProbabilityModel for AnyModel {
     fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
         match self {
-            Self::Constant(m) => m.probability_up(tick, history),
             Self::Gaussian(m) => m.probability_up(tick, history),
             Self::Transformer(m) => m.probability_up(tick, history),
         }
@@ -186,6 +175,15 @@ where
 mod tests {
     use super::*;
     use crate::tick_processor::{Direction, TickSnapshot};
+
+    #[derive(Debug, Clone, Copy)]
+    struct ConstantModel;
+
+    impl ProbabilityModel for ConstantModel {
+        fn probability_up(&self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+            0.6
+        }
+    }
 
     #[test]
     fn emits_signal_only_when_threshold_and_streak_match() {

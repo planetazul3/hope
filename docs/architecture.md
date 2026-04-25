@@ -17,13 +17,15 @@
 
 ## Model Architecture
 
-### Transformer V2 (Neural Pattern Learning)
-The engine utilizes a high-sensitivity Transformer Encoder (V2) to identify micro-patterns in tick sequences.
+### GatedTCN V4 (Noise-Resilient Learning)
+The engine utilizes a Gated Temporal Convolutional Network (V4) to identify micro-patterns in tick sequences while suppressing microstructure noise.
 - **Sequence Window**: 32 ticks (~30-45 seconds of market data).
-- **Features**: Multi-dimensional input per tick (Direction, Magnitude, Streak, Reversal timing, Volatility).
-- **Structure**: 3-layer depth with 4-head multi-head attention.
-- **Workflow**: Decoupled CSV-based training (`data/ticks.csv`) for high-performance data loading and portability to cloud environments (Colab/Kaggle).
-- **Regularization**: Integrated LayerNorm and Dropout for stability against financial market noise.
+- **Features**: 7-dimensional input per tick (5 base features + 2 Haar Wavelet DWT coefficients A1/D1).
+- **Structure**: 4-layer Causal Dilated Convolutions with Squeeze-and-Excitation (SE) channel attention.
+- **Training**: Two-phase curriculum:
+    1. **Contrastive Pre-training**: Learns noise-resilient representations via InfoNCE loss on jittered views.
+    2. **Supervised Fine-tuning**: Optimizes directional classification (Focal Loss) and volatility prediction (MSE).
+- **Workflow**: Vectorized preprocessing and DWT decomposition ensuring sub-100µs inference latency.
 
 ## Core Boundaries
 

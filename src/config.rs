@@ -44,6 +44,10 @@ pub struct AppConfig {
     pub strategy_momentum_reward: f64,
     /// Minimum return as ratio of volatility (noise filter).
     pub strategy_min_return_ratio: f64,
+    /// Path to the tick audit log file.
+    pub tick_audit_log_path: String,
+    /// Payout ratio for wins (e.g., 0.95 for 95%).
+    pub payout_ratio: f64,
 }
 
 impl AppConfig {
@@ -139,6 +143,10 @@ impl AppConfig {
                 "STRATEGY_MIN_RETURN_RATIO",
                 0.1,
             )?,
+            tick_audit_log_path: lookup_env(&env_map, "TICK_AUDIT_LOG_PATH")
+                .map(|v| v.into_owned())
+                .unwrap_or_else(|_| "tick_audit.log".to_string()),
+            payout_ratio: parse_or_default(&env_map, "DERIV_PAYOUT_RATIO", 0.95)?,
         })
     }
 }

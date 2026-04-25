@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -12,20 +12,17 @@ use url::Url;
 
 use crate::{config::AppConfig, execution::ProposalSpec};
 
-// Step 0 audit summary:
-// - WebSocket loop already uses a single persistent connection with reconnect.
-// - Existing message handling classified all non-error frames as ticks, risking state desync.
-// - `tx.send(...).await` in the read loop can block tick processing under backpressure.
-// - No per-message routing for tick/trade/system frames, which obscures downstream FSM control.
-// Step 1 fix focus:
-// - Keep single-connection lifecycle and reconnect semantics.
-// - Add deterministic message routing (tick/trade/error/other).
-// - Use non-blocking channel sends in the hot read loop.
+// Audit summary (RESOLVED):
+// - Maintained single-connection lifecycle with robust reconnect semantics.
+// - Implemented deterministic message routing (tick/trade/error) to prevent state desync.
+// - Replaced blocking sends with non-blocking `try_send` in the hot read loop.
+// - Added atomic drop counters and detailed error events for improved observability.
 
 #[derive(Debug)]
 pub struct DerivWebSocketClient {
     cfg: AppConfig,
     req_id_counter: Arc<AtomicU32>,
+    dropped_events: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -201,6 +198,7 @@ impl DerivWebSocketClient {
         Self {
             cfg,
             req_id_counter,
+            dropped_events: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -220,6 +218,7 @@ impl DerivWebSocketClient {
             try_emit(
                 &event_tx,
                 WebSocketEvent::Status(ConnectionStatus::Connecting),
+                &self.dropped_events,
             )?;
             info!(url = %ws_url, "connecting to Deriv websocket");
 
@@ -228,6 +227,7 @@ impl DerivWebSocketClient {
                     try_emit(
                         &event_tx,
                         WebSocketEvent::Status(ConnectionStatus::Connected),
+                        &self.dropped_events,
                     )?;
                     info!("connected to Deriv websocket");
 
@@ -255,6 +255,7 @@ impl DerivWebSocketClient {
                     try_emit(
                         &event_tx,
                         WebSocketEvent::Status(ConnectionStatus::SubscribedTicks),
+                        &self.dropped_events,
                     )?;
 
                     loop {
@@ -340,6 +341,7 @@ impl DerivWebSocketClient {
             try_emit(
                 &event_tx,
                 WebSocketEvent::Status(ConnectionStatus::Disconnected),
+                &self.dropped_events,
             )?;
             tokio::time::sleep(self.cfg.reconnect_backoff).await;
         }
@@ -368,6 +370,7 @@ impl DerivWebSocketClient {
                     message: error.message,
                     req_id,
                 }),
+                &self.dropped_events,
             )?;
             return Ok(());
         }
@@ -384,10 +387,12 @@ impl DerivWebSocketClient {
                             balance: authorize.balance,
                             _req_id: req_id,
                         }),
+                        &self.dropped_events,
                     )?;
                     try_emit(
                         event_tx,
                         WebSocketEvent::Status(ConnectionStatus::Authorized),
+                        &self.dropped_events,
                     )?;
                 }
             }
@@ -399,6 +404,7 @@ impl DerivWebSocketClient {
                             epoch: tick.epoch,
                             quote: tick.quote,
                         }),
+                        &self.dropped_events,
                     )?;
                 }
             }
@@ -412,6 +418,7 @@ impl DerivWebSocketClient {
                             ask_price: proposal.ask_price,
                             req_id,
                         }),
+                        &self.dropped_events,
                     )?;
                 }
             }
@@ -425,6 +432,7 @@ impl DerivWebSocketClient {
                             buy_price: buy.buy_price,
                             req_id,
                         }),
+                        &self.dropped_events,
                     )?;
                 }
             }
@@ -434,6 +442,7 @@ impl DerivWebSocketClient {
                     try_emit(
                         event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::OpenContract(update)),
+                        &self.dropped_events,
                     )?;
                 }
             }
@@ -480,13 +489,55 @@ impl DerivWebSocketClient {
     }
 }
 
-fn try_emit(tx: &mpsc::Sender<WebSocketEvent>, event: WebSocketEvent) -> Result<()> {
+fn try_emit(
+    tx: &mpsc::Sender<WebSocketEvent>,
+    event: WebSocketEvent,
+    dropped: &AtomicU64,
+) -> Result<()> {
     match tx.try_send(event) {
         Ok(_) => Ok(()),
         Err(mpsc::error::TrySendError::Full(_)) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
             warn!("event channel full; dropping event");
             Ok(())
         }
         Err(mpsc::error::TrySendError::Closed(_)) => Err(anyhow!("event channel closed")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_try_emit_success() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let dropped = AtomicU64::new(0);
+        let event = WebSocketEvent::Status(ConnectionStatus::Connected);
+        
+        try_emit(&tx, event, &dropped).unwrap();
+        
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        let received = rx.try_recv().unwrap();
+        if let WebSocketEvent::Status(ConnectionStatus::Connected) = received {
+            // ok
+        } else {
+            panic!("unexpected event");
+        }
+    }
+
+    #[test]
+    fn test_try_emit_dropped() {
+        let (tx, _rx) = mpsc::channel(1);
+        let dropped = AtomicU64::new(0);
+        
+        // Fill the channel
+        tx.try_send(WebSocketEvent::Status(ConnectionStatus::Connected)).unwrap();
+        
+        // Next emit should drop
+        let event = WebSocketEvent::Status(ConnectionStatus::Disconnected);
+        try_emit(&tx, event, &dropped).unwrap();
+        
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 }

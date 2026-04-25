@@ -31,6 +31,7 @@ wheels/
 # Data & Models
 *.log
 *.onnx
+model_quantized.onnx
 *.onnx.data
 *.pt
 *.pth
