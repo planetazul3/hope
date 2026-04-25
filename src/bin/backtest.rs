@@ -32,11 +32,8 @@ fn main() {
         }
     };
 
-    let strategy = StrategyEngine::new(
-        config.probability_threshold,
-        model,
-        config.min_trend_length,
-    );
+    let strategy =
+        StrategyEngine::new(config.probability_threshold, model, config.min_trend_length);
 
     let mut total_trades = 0;
     let mut wins = 0;

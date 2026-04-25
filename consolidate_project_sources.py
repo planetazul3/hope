@@ -22,10 +22,9 @@ import mimetypes
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Set
 
 # Configure logging
 logging.basicConfig(
@@ -145,7 +144,8 @@ class FileWalker:
     @staticmethod
     def get_file_language(file_path: Path) -> str:
         ext = file_path.suffix.lower()
-        if file_path.name == "Cargo.toml": return "TOML (Cargo)"
+        if file_path.name == "Cargo.toml":
+            return "TOML (Cargo)"
         return LANGUAGE_MAP.get(ext, "Text")
 
     def build_file_tree(self, directory: Path, prefix: str = "") -> List[str]:
@@ -183,10 +183,11 @@ class ReportGenerator:
         out.write("\n" + "#" * 80 + "\n")
         out.write(f"DATABASE FILE DETECTED: {rel_path}\n")
         out.write("#" * 80 + "\n")
-        out.write(f"Type:      Data/Database (Content Ignored)\n")
+        out.write("Type:      Data/Database (Content Ignored)\n")
         out.write(f"Size:      {file_stat.st_size:,} bytes\n")
         content_desc = "Ticks/Market Data" if "tick" in rel_path.name.lower() else "General Data"
-        if "candle" in rel_path.name.lower(): content_desc = "Candle/OHLC Data"
+        if "candle" in rel_path.name.lower():
+            content_desc = "Candle/OHLC Data"
         out.write(f"Estimated Content: {content_desc}\n")
         out.write("-" * 80 + "\n\n")
 
@@ -236,7 +237,8 @@ class ProjectConsolidator:
             self.generator.write_header(out, git_info)
             tree = self.walker.build_file_tree(self.project_root)
             out.write("PROJECT STRUCTURE\n" + "-" * 80 + "\n")
-            for line in tree: out.write(line + "\n")
+            for line in tree:
+                out.write(line + "\n")
             out.write("\n")
             
             for root, dirs, files in os.walk(self.project_root):
@@ -297,7 +299,7 @@ class ProjectConsolidator:
         try:
             rev = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip()
             return {"commit": rev}
-        except:
+        except Exception:
             return {}
 
     def _print_summary(self, output_path: Path):
