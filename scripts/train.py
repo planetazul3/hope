@@ -174,10 +174,11 @@ def train_and_export():
             
             optimizer.zero_grad()
             output = model(batch_x)
+            # Loss calculation with Focal Loss and Label Smoothing
             loss = focal_loss(output, batch_y, torch.tensor(pos_weight_val).to(device))
             loss.backward()
             
-            # Task 1: Gradient clipping
+            # Gradient clipping to ensure training stability in deep Transformers
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             
             optimizer.step()

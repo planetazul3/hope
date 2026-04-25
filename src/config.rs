@@ -36,9 +36,13 @@ pub struct AppConfig {
     pub model_type: ModelType,
     pub transformer_model_path: Option<String>,
     pub transformer_sequence_length: usize,
+    /// Minimum number of ticks a trend must persist (momentum guard).
     pub min_trend_length: u32,
+    /// Added to threshold when volatility < 0.0001.
     pub strategy_volatility_penalty: f64,
+    /// Subtracted from threshold when streak >= 4.
     pub strategy_momentum_reward: f64,
+    /// Minimum return as ratio of volatility (noise filter).
     pub strategy_min_return_ratio: f64,
 }
 

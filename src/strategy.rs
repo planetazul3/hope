@@ -75,12 +75,21 @@ pub struct StrategyDecision {
     pub signal: Option<SignalDirection>,
 }
 
+/// Core engine for evaluating tick data and generating trading signals.
+/// Uses a probability model (Gaussian or Transformer) and applies multiple
+/// filters and dynamic thresholds to minimize false positives.
 pub struct StrategyEngine<M> {
+    /// Base probability threshold (e.g., 0.55 for 55% confidence).
     threshold: f64,
+    /// The underlying probability model used for inference.
     model: M,
+    /// Minimum number of ticks a trend must persist before considering a signal.
     min_trend_length: u32,
+    /// Penalty added to the threshold during low-volatility regimes to avoid noise.
     volatility_penalty: f64,
+    /// Reward subtracted from the threshold when strong momentum (long streaks) is detected.
     momentum_reward: f64,
+    /// Minimum return magnitude as a ratio of volatility required to signal.
     min_return_ratio: f64,
 }
 
