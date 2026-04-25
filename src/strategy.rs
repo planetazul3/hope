@@ -79,6 +79,8 @@ pub struct StrategyEngine<M> {
     threshold: f64,
     model: M,
     min_trend_length: u32,
+    volatility_penalty: f64,
+    momentum_reward: f64,
 }
 
 const MIN_RETURN_RATIO: f64 = 0.1;
@@ -87,11 +89,19 @@ impl<M> StrategyEngine<M>
 where
     M: ProbabilityModel,
 {
-    pub fn new(threshold: f64, model: M, min_trend_length: u32) -> Self {
+    pub fn new(
+        threshold: f64,
+        model: M,
+        min_trend_length: u32,
+        volatility_penalty: f64,
+        momentum_reward: f64,
+    ) -> Self {
         Self {
             threshold,
             model,
             min_trend_length,
+            volatility_penalty,
+            momentum_reward,
         }
     }
 
@@ -128,21 +138,21 @@ where
         let probability_up = self.model.probability_up(tick, history);
         let probability_down = 1.0 - probability_up;
 
-        // Task 6: Dynamic confidence threshold
+        // Task 8: Dynamic confidence threshold using fields
         let mut adjusted_threshold = self.threshold;
 
         // Reward strong momentum
         if tick.streak >= 4 {
-            adjusted_threshold -= 0.02;
+            adjusted_threshold -= self.momentum_reward;
         }
 
         // Penalty for low volatility
         if tick.volatility < 0.0001 {
-            adjusted_threshold += 0.05;
+            adjusted_threshold += self.volatility_penalty;
         }
 
         // Clamp to ensure it doesn't fall below floor
-        adjusted_threshold = adjusted_threshold.max(self.threshold - 0.05);
+        adjusted_threshold = adjusted_threshold.max(self.threshold - self.volatility_penalty);
 
         // General trend is positive if probability_up > 0.5 (driven by positive drift)
         // General trend is negative if probability_down > 0.5 (driven by negative drift)
@@ -181,7 +191,7 @@ mod tests {
             ..Default::default()
         };
 
-        let strategy = StrategyEngine::new(0.55, ConstantModel, 5);
+        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.6);
@@ -202,7 +212,7 @@ mod tests {
             ..Default::default()
         };
 
-        let strategy = StrategyEngine::new(0.55, ConstantModel, 5);
+        let strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.5);
@@ -226,7 +236,7 @@ mod tests {
         // Case 1: ConstantModel returns 0.6.
         // Base threshold 0.58. Adjusted is 0.63.
         // 0.6 >= 0.58 but 0.6 < 0.63. Should be None.
-        let strategy = StrategyEngine::new(0.58, ConstantModel, 5);
+        let strategy = StrategyEngine::new(0.58, ConstantModel, 5, 0.05, 0.02);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
         assert_eq!(decision.signal, None);
 

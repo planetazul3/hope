@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub transformer_model_path: Option<String>,
     pub transformer_sequence_length: usize,
     pub min_trend_length: u32,
+    pub strategy_volatility_penalty: f64,
+    pub strategy_momentum_reward: f64,
 }
 
 impl AppConfig {
@@ -121,6 +123,12 @@ impl AppConfig {
                 32_usize,
             )?,
             min_trend_length: parse_or_default(&env_map, "STRATEGY_MIN_TREND_LENGTH", 5)?,
+            strategy_volatility_penalty: parse_or_default(
+                &env_map,
+                "STRATEGY_VOLATILITY_PENALTY",
+                0.05,
+            )?,
+            strategy_momentum_reward: parse_or_default(&env_map, "STRATEGY_MOMENTUM_REWARD", 0.02)?,
         })
     }
 }

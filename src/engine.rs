@@ -107,6 +107,8 @@ impl Engine {
                 config.probability_threshold,
                 model,
                 config.min_trend_length,
+                config.strategy_volatility_penalty,
+                config.strategy_momentum_reward,
             ),
             execution: ExecutionEngine::new(config.min_api_interval, config.max_tick_latency),
             risk: RiskManager::new(3),
@@ -595,6 +597,8 @@ mod tests {
             transformer_model_path: None,
             transformer_sequence_length: 32,
             min_trend_length: 5,
+            strategy_volatility_penalty: 0.05,
+            strategy_momentum_reward: 0.02,
         }
     }
 

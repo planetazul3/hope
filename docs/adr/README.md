@@ -19,3 +19,4 @@ This directory stores Architecture Decision Records (ADRs) for `hope`.
 - [0006 - Gaussian Probability Model](./0006-gaussian-probability-model.md)
 - [0007 - Neural Inference Integration](./0007-neural-inference-integration.md)
 - [0008 - ML Training Pipeline Optimizations](./0008-ml-training-pipeline-optimizations.md)
+- [0009 - Advanced ML Training and Strategy Enhancements](./0009-advanced-ml-training-and-strategy-enhancements.md)

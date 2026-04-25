@@ -71,6 +71,11 @@ The system defaults to a high-sensitivity Transformer V2 model.
 - **Inference**: Handled by the `tract` engine in Rust using `model.onnx`.
 - **Latency**: Expect ~0.5ms - 1.2ms per inference on modern CPUs.
 
+### Strategy Thresholds
+The `StrategyEngine` uses dynamic modifiers that can be tuned in `.env`:
+- `STRATEGY_MOMENTUM_REWARD`: Reduction in threshold when `streak >= 4` (Default: 0.02).
+- `STRATEGY_VOLATILITY_PENALTY`: Increase in threshold when volatility is low (Default: 0.05).
+
 ## Troubleshooting
 -   **Invalid State Transition**: Indicates a race condition was blocked by the FSM. The engine resets to `Idle`.
 -   **InternalQueueFull**: Outbound command channel is saturated. Check if the WebSocket connection is hanging.

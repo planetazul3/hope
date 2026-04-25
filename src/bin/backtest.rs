@@ -32,8 +32,13 @@ fn main() {
         }
     };
 
-    let strategy =
-        StrategyEngine::new(config.probability_threshold, model, config.min_trend_length);
+    let strategy = StrategyEngine::new(
+        config.probability_threshold,
+        model,
+        config.min_trend_length,
+        config.strategy_volatility_penalty,
+        config.strategy_momentum_reward,
+    );
 
     let mut total_trades = 0;
     let mut wins = 0;
