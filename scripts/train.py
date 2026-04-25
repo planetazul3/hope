@@ -1,158 +1,160 @@
 import torch
 import torch.nn as nn
 import torch.onnx
+import math
+import pandas as pd
+import numpy as np
+import os
 
 class SimpleTransformer(nn.Module):
-    def __init__(self, input_dim=5, d_model=16, nhead=2, num_layers=2):
+    def __init__(self, input_dim=5, d_model=32, nhead=4, num_layers=3, max_seq_len=32, dropout=0.1):
         super(SimpleTransformer, self).__init__()
+        self.input_norm = nn.LayerNorm(input_dim)
         self.embedding = nn.Linear(input_dim, d_model)
-        encoder_layers = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead, batch_first=True)
+        
+        pe = torch.zeros(max_seq_len, d_model)
+        position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+        
+        self.dropout = nn.Dropout(p=dropout)
+        encoder_layers = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=nhead, 
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            batch_first=True
+        )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
         self.fc = nn.Linear(d_model, 1)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        # x shape: (batch, seq_len, input_dim)
+        x = self.input_norm(x)
         x = self.embedding(x)
+        x = x + self.pe[:, :x.size(1), :]
+        x = self.dropout(x)
         x = self.transformer_encoder(x)
-        # Use the last sequence element
-        x = x[:, -1, :]
+        x = torch.mean(x, dim=1)
         x = self.fc(x)
         return self.sigmoid(x)
 
-import sqlite3
-import numpy as np
-
-def load_real_data(db_path, limit=100000):
-    print(f"Loading data from {db_path}...")
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("SELECT quote FROM ticks ORDER BY epoch ASC LIMIT ?", (limit,))
-    rows = cursor.fetchall()
-    conn.close()
-    return np.array([r[0] for r in rows], dtype=np.float32)
-
-def prepare_features(prices, seq_len=16):
-    print("Preparing features...")
-    # Feature extraction mirroring Rust TickProcessor logic
-    # Features: Direction, Return Magnitude, Streak, Ticks since reversal, Volatility
+def load_data_from_csv(csv_path, limit=200000):
+    print(f"Loading data from {csv_path}...")
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"CSV not found at {csv_path}. Run 'make export' first.")
     
+    # Read CSV (expecting columns: epoch, quote)
+    df = pd.read_csv(csv_path, nrows=limit)
+    return df['quote'].values.astype(np.float32)
+
+def prepare_features(prices, seq_len=32):
+    print(f"Preparing features (N={len(prices)})...")
     returns = np.diff(prices)
     directions = np.sign(returns)
     magnitudes = np.abs(returns)
     
     streaks = []
     reversals = []
-    
-    last_trend_direction = 0 # 1 for Up, -1 for Down
+    last_trend_direction = 0
     last_direction = 0
     curr_streak = 0
     ticks_since_reversal = 0
     
     for d in directions:
-        # Streak logic: reset on flat (0), increment if same as last
-        if d == 0:
-            curr_streak = 0
-        elif d == last_direction:
-            curr_streak += 1
-        else:
-            curr_streak = 1
+        if d == 0: curr_streak = 0
+        elif d == last_direction: curr_streak += 1
+        else: curr_streak = 1
         
-        # Reversal logic: flip between Up (1) and Down (-1)
         if (d == 1 and last_trend_direction == -1) or (d == -1 and last_trend_direction == 1):
             ticks_since_reversal = 1
         elif d != 0:
             ticks_since_reversal += 1
             
-        if d != 0:
-            last_trend_direction = d
-            
+        if d != 0: last_trend_direction = d
         streaks.append(curr_streak)
         reversals.append(ticks_since_reversal)
         last_direction = d
         
-    # Volatility (rolling std of returns) - mirroring calculate_stats in Rust
-    # Rust uses simple moving standard deviation of absolute returns
     vol = []
     for i in range(len(returns)):
-        start = max(0, i - 19) # Capacity is 64 in Rust, but stats use available len
-        # Rust calculate_stats uses self.len which is up to 64.
-        # Simple Transformer uses 20-period vol in Python. Let's keep it consistent.
-        # Actually Rust calculate_stats uses the whole ring buffer (up to 64).
-        # Let's match the 20-period for now as it's common, but ensure it's calculated on returns.
+        start = max(0, i - 19)
         vol.append(np.std(returns[start:i+1]))
         
-    # Combine into (N, 5)
-    # Note: returns has len N-1, so we lose the first price
     features = np.stack([directions, magnitudes, streaks, reversals, vol], axis=1)
     
-    # Create sequences
     x, y = [], []
     for i in range(len(features) - seq_len):
         x.append(features[i:i+seq_len])
-        # Target: 1 if next return is positive
         y.append(1.0 if returns[i+seq_len] > 0 else 0.0)
         
     return torch.from_numpy(np.array(x, dtype=np.float32)), torch.from_numpy(np.array(y, dtype=np.float32)).unsqueeze(1)
 
 def train_and_export():
-    db_path = "data/tick_store.db"
-    seq_len = 16
+    csv_path = "data/ticks.csv"
+    seq_len = 32
     input_dim = 5
     
     try:
-        prices = load_real_data(db_path, limit=5000)
-        x_train, y_train = prepare_features(prices, seq_len)
+        prices = load_data_from_csv(csv_path)
+        x_all, y_all = prepare_features(prices, seq_len)
     except Exception as e:
-        print(f"Failed to load real data: {e}. Using dummy data instead.")
-        x_train = torch.randn(64, seq_len, input_dim)
-        y_train = torch.rand(64, 1)
+        print(f"Error loading CSV: {e}. Using synthetic data.")
+        x_all = torch.randn(1000, seq_len, input_dim)
+        y_all = torch.randint(0, 2, (1000, 1)).float()
 
-    # Device detection
+    num_samples = len(x_all)
+    split_idx = int(num_samples * 0.8)
+    x_train, x_val = x_all[:split_idx], x_all[split_idx:]
+    y_train, y_val = y_all[:split_idx], y_all[split_idx:]
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    model = SimpleTransformer(input_dim=input_dim).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    model = SimpleTransformer(input_dim=input_dim, max_seq_len=seq_len).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0005, weight_decay=0.01)
     criterion = nn.BCELoss()
     
-    print(f"Training on {len(x_train)} samples...")
+    print(f"Training V2 (CSV-based) on {len(x_train)} samples...")
     batch_size = 64
-    for epoch in range(5):
-        epoch_loss = 0
+    for epoch in range(15):
+        model.train()
+        train_loss = 0
         for i in range(0, len(x_train), batch_size):
             batch_x = x_train[i:i+batch_size].to(device)
             batch_y = y_train[i:i+batch_size].to(device)
-            
             optimizer.zero_grad()
             output = model(batch_x)
             loss = criterion(output, batch_y)
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item()
+            train_loss += loss.item() * len(batch_x)
             
-        print(f"Epoch {epoch}, Loss: {epoch_loss / (len(x_train)/batch_size):.4f}")
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for i in range(0, len(x_val), batch_size):
+                batch_x = x_val[i:i+batch_size].to(device)
+                batch_y = y_val[i:i+batch_size].to(device)
+                output = model(batch_x)
+                loss = criterion(output, batch_y)
+                val_loss += loss.item() * len(batch_x)
+        
+        print(f"Epoch {epoch}, Train Loss: {train_loss/len(x_train):.4f}, Val Loss: {val_loss/len(x_val):.4f}")
             
-    # Export to ONNX
-    dummy_input = torch.randn(1, seq_len, input_dim)
+    model.eval()
     dummy_input = torch.randn(1, seq_len, input_dim).to(device)
-    onnx_path = "model.onnx"
-    
-    print(f"Exporting to {onnx_path}...")
-    # We use a script-friendly export if possible, but let's try the direct way again
-    # with a smaller model if needed.
     torch.onnx.export(
-        model,
-        dummy_input,
-        onnx_path,
-        export_params=True,
-        opset_version=11,
+        model, dummy_input, "model.onnx",
+        export_params=True, opset_version=11,
         do_constant_folding=True,
-        input_names=['input'],
-        output_names=['output'],
-        training=torch.onnx.TrainingMode.EVAL
+        input_names=['input'], output_names=['output'],
+        dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}}
     )
-    print("Done.")
+    print("Export complete: model.onnx")
 
 if __name__ == "__main__":
     train_and_export()

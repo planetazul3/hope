@@ -118,7 +118,7 @@ impl AppConfig {
             transformer_sequence_length: parse_or_default(
                 &env_map,
                 "TRANSFORMER_SEQUENCE_LENGTH",
-                16_usize,
+                32_usize,
             )?,
             min_trend_length: parse_or_default(&env_map, "STRATEGY_MIN_TREND_LENGTH", 5)?,
         })

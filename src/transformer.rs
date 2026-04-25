@@ -8,6 +8,11 @@ use crate::tick_processor::TickSnapshot;
 
 type TractModel = RunnableModel<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
 
+/// Transformer-based probability model using ONNX inference.
+///
+/// This model (V2) uses a 3-layer, 4-head attention architecture with global average pooling
+/// to estimate the probability of the next tick being UP based on a sliding window
+/// of features (typically 32 ticks).
 pub struct TransformerModel {
     model: TractModel,
     sequence_length: usize,

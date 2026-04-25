@@ -15,6 +15,16 @@
 7.  **Risk Management**: `src/risk.rs` tracks consecutive losses and sessions metrics, triggering a cooldown state after three losses.
 8.  **Audit Logging**: `src/tick_logger.rs` writes high-resolution audit records asynchronously with restrictive file permissions (`0o600`).
 
+## Model Architecture
+
+### Transformer V2 (Neural Pattern Learning)
+The engine utilizes a high-sensitivity Transformer Encoder (V2) to identify micro-patterns in tick sequences.
+- **Sequence Window**: 32 ticks (~30-45 seconds of market data).
+- **Features**: Multi-dimensional input per tick (Direction, Magnitude, Streak, Reversal timing, Volatility).
+- **Structure**: 3-layer depth with 4-head multi-head attention.
+- **Workflow**: Decoupled CSV-based training (`data/ticks.csv`) for high-performance data loading and portability to cloud environments (Colab/Kaggle).
+- **Regularization**: Integrated LayerNorm and Dropout for stability against financial market noise.
+
 ## Core Boundaries
 
 -   **System Layer**: Handles transport, tick buffering, FSM transitions, execution gating, risk controls, and logging.

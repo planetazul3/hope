@@ -1,4 +1,4 @@
-.PHONY: help fmt check test verify run backtest export consolidate setup clean
+.PHONY: help fmt check test verify run backtest export collect consolidate setup clean
 
 # Default target
 help:
@@ -11,6 +11,7 @@ help:
 	@echo "run         : Start the trading engine"
 	@echo "backtest    : Run strategy backtesting on data/ticks.csv"
 	@echo "export      : Export ticks from SQLite to data/ticks.csv"
+	@echo "collect     : Collect historical ticks from Deriv API"
 	@echo "consolidate : Generate an audit snapshot of the project"
 	@echo "setup       : Install Python dependencies from requirements.txt"
 	@echo "clean       : Remove audit logs and temporary artifacts"
@@ -34,6 +35,9 @@ backtest:
 
 export:
 	python3 scripts/export_db.py
+
+collect:
+	python3 scripts/tick_collector.py --hours 24
 
 consolidate:
 	python3 consolidate_project_sources.py

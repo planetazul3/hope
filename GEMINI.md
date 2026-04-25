@@ -21,7 +21,9 @@ Use Cargo and the provided Makefile for local workflows.
 
 - `make run` starts the live trading engine.
 - `make backtest` runs strategy simulation on `data/ticks.csv`.
-- `make export` exports ticks from SQLite to CSV for backtesting.
+- `make export` exports ticks from SQLite to CSV for backtesting and training.
+- `make collect` collects historical ticks from Deriv API.
+- `python3 scripts/train.py` trains the Transformer V2 model using data/ticks.csv.
 - `make verify` runs format, check, and tests.
 - `make consolidate` generates an audit snapshot for AI analysis.
 - `cargo fmt` applies standard Rust formatting.
@@ -31,6 +33,13 @@ Run `cargo fmt && cargo check --offline && cargo test --offline` before opening 
 
 ## Coding Style & Naming Conventions
 Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `snake_case` for functions, modules, and variables, and `PascalCase` for structs and enums. Prefer small, focused types like `WebSocketClientConfig` and `WebSocketEvent`; keep fallible paths returning `anyhow::Result` where that pattern is already in use.
+
+### Machine Learning Workflow
+1. **Data**: Collect ticks with `make collect`.
+2. **Export**: Convert to CSV with `make export`.
+3. **Training**: Run `python3 scripts/train.py` (Local) or use `notebooks/train_transformer.ipynb` (Colab/Kaggle).
+4. **Deploy**: Ensure `model.onnx` is in the project root.
+5. **Config**: Set `TRANSFORMER_SEQUENCE_LENGTH=32` in `.env`.
 
 ## Testing Guidelines
 Prefer unit tests close to the code they cover with `#[cfg(test)] mod tests`. Name tests by behavior, for example `reconnects_after_socket_error`. Add integration tests under `tests/` only when validating crate-level behavior across modules. New parsing, reconnect, or error-handling logic should ship with tests.

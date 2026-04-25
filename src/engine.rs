@@ -593,7 +593,7 @@ mod tests {
             trading_enabled: true,
             model_type: crate::config::ModelType::Gaussian,
             transformer_model_path: None,
-            transformer_sequence_length: 16,
+            transformer_sequence_length: 32,
             min_trend_length: 5,
         }
     }
