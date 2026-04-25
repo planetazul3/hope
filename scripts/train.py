@@ -47,8 +47,8 @@ def load_data_from_csv(csv_path, limit=200000):
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"CSV not found at {csv_path}. Run 'make export' first.")
     
-    # Read CSV (expecting columns: epoch, quote)
-    df = pd.read_csv(csv_path, nrows=limit)
+    # Read CSV without header, naming columns manually
+    df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'], nrows=limit)
     return df['quote'].values.astype(np.float32)
 
 def prepare_features(prices, seq_len=32):
