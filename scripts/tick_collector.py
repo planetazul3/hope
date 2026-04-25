@@ -5,6 +5,7 @@ import argparse
 import os
 import sys
 import time
+import signal
 from pathlib import Path
 
 try:
@@ -82,61 +83,68 @@ async def collect_ticks(symbol: str, target_count: int, db_path: str, hours: flo
     batch_num = 0
 
     print(f"Starting collection: symbol={symbol}, target={target_count:,}, db={db_path}")
+    print("Press Ctrl+C to stop gracefully.")
 
-    async with websockets.connect(DERIV_WS_URL) as ws:
-        while total_inserted < target_count:
-            batch_num += 1
-            print(f"Batch {batch_num}: requesting {BATCH_SIZE} ticks"
-                  + (f" ending at epoch {end_epoch}" if end_epoch is not None else " (latest)"))
+    try:
+        async with websockets.connect(DERIV_WS_URL) as ws:
+            while total_inserted < target_count:
+                batch_num += 1
+                print(f"Batch {batch_num}: requesting {BATCH_SIZE} ticks"
+                      + (f" ending at epoch {end_epoch}" if end_epoch is not None else " (latest)"))
 
-            try:
-                history = await fetch_batch(ws, symbol, end_epoch)
-            except Exception as e:
-                print(f"Fetch failed: {e}")
-                break
+                try:
+                    history = await fetch_batch(ws, symbol, end_epoch)
+                except Exception as e:
+                    print(f"Fetch failed: {e}")
+                    break
 
-            epochs = history["times"]
-            quotes = history["prices"]
+                epochs = history["times"]
+                quotes = history["prices"]
 
-            if not epochs:
-                print("No ticks returned — server history limit reached.")
-                break
+                if not epochs:
+                    print("No ticks returned — server history limit reached.")
+                    break
 
-            oldest_epoch = min(epochs)
+                oldest_epoch = min(epochs)
 
-            if oldest_epoch == prev_oldest_epoch:
-                print(f"Oldest epoch unchanged ({oldest_epoch}) — server history exhausted.")
-                break
+                if oldest_epoch == prev_oldest_epoch:
+                    print(f"Oldest epoch unchanged ({oldest_epoch}) — server history exhausted.")
+                    break
 
-            if window_start_epoch and oldest_epoch < window_start_epoch:
-                # Still insert the current batch but stop after
-                insert_batch(conn, epochs, quotes)
-                print(f"Reached window boundary (epoch {window_start_epoch}) — stopping.")
-                break
+                if window_start_epoch and oldest_epoch < window_start_epoch:
+                    # Still insert the current batch but stop after
+                    insert_batch(conn, epochs, quotes)
+                    print(f"Reached window boundary (epoch {window_start_epoch}) — stopping.")
+                    break
 
-            inserted = insert_batch(conn, epochs, quotes)
-            total_inserted += inserted
+                inserted = insert_batch(conn, epochs, quotes)
+                total_inserted += inserted
 
-            print(
-                f"  → Received {len(epochs)} ticks, inserted {inserted} new | "
-                f"oldest epoch: {oldest_epoch} | total inserted: {total_inserted:,}"
-            )
+                print(
+                    f"  → Received {len(epochs)} ticks, inserted {inserted} new | "
+                    f"oldest epoch: {oldest_epoch} | total inserted: {total_inserted:,}"
+                )
 
-            prev_oldest_epoch = oldest_epoch
-            end_epoch = oldest_epoch
+                prev_oldest_epoch = oldest_epoch
+                end_epoch = oldest_epoch
 
-            if len(epochs) < BATCH_SIZE:
-                print("Received fewer ticks than batch size — history exhausted.")
-                break
+                if len(epochs) < BATCH_SIZE:
+                    print("Received fewer ticks than batch size — history exhausted.")
+                    break
 
-            if total_inserted < target_count:
-                print(f"  Sleeping {RATE_LIMIT_SLEEP}s (rate limit)...")
-                await asyncio.sleep(RATE_LIMIT_SLEEP)
-
-    final_count = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
-    conn.close()
-    print(f"\nDone. Batches: {batch_num}, new ticks inserted: {total_inserted:,}, "
-          f"total in DB: {final_count:,}")
+                if total_inserted < target_count:
+                    print(f"  Sleeping {RATE_LIMIT_SLEEP}s (rate limit)...")
+                    await asyncio.sleep(RATE_LIMIT_SLEEP)
+                    
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        print("\nInterrupt received, shutting down gracefully...")
+    except Exception as e:
+        print(f"\nUnexpected error: {e}")
+    finally:
+        final_count = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
+        conn.close()
+        print(f"\nSummary: Batches: {batch_num}, new ticks inserted: {total_inserted:,}, "
+              f"total in DB: {final_count:,}")
 
 def main():
     parser = argparse.ArgumentParser(description="Deriv tick collector")
@@ -146,12 +154,26 @@ def main():
     parser.add_argument("--hours", type=float, default=24, help="Last N hours")
     args = parser.parse_args()
 
-    asyncio.run(collect_ticks(
-        symbol=args.symbol,
-        target_count=args.count,
-        db_path=args.db,
-        hours=args.hours,
-    ))
+    # Use a loop that can be interrupted
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Define a handler for signals
+    def stop_loop():
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+
+    try:
+        loop.run_until_complete(collect_ticks(
+            symbol=args.symbol,
+            target_count=args.count,
+            db_path=args.db,
+            hours=args.hours,
+        ))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     main()

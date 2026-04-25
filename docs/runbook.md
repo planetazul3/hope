@@ -32,7 +32,13 @@ LOG_LEVEL=debug make run
 ```
 
 ### Strategy Backtesting & Training
-1.  **Prepare Data**: Export your latest collected ticks from SQLite to CSV:
+1.  **Collect Data**: Fetch historical ticks from Deriv API:
+    ```bash
+    make collect
+    ```
+    *Note: You can stop this gracefully at any time with Ctrl+C.*
+
+2.  **Prepare Data**: Export your latest collected ticks from SQLite to CSV:
     ```bash
     make export
     ```
