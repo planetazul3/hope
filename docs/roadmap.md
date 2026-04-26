@@ -78,7 +78,8 @@ Status: `In Progress`
 - [x] Implement Multi-task learning (Auxiliary Volatility Head) for latent space regularization
 - [x] Implement High-Fidelity Backtesting simulation in `src/bin/backtest.rs`
 - [x] Implement INT8 Quantization for ONNX models to optimize L1/L2 cache residency
-- [ ] Explore regime-specific scaling and contrastive pre-training on multi-instrument data
+- [x] Implement high-fidelity data engineering pipeline: multi-symbol collection, incremental exports, and automated data validation
+- [/] Explore regime-specific scaling and contrastive pre-training on multi-instrument data
 
 ## Stage 11 - ML Quality and Cloud Enforcement
 

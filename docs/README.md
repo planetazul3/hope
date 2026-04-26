@@ -27,7 +27,9 @@ Detailed justifications for technical choices:
 -   [ADR 0011: Gated TCN with Squeeze-and-Excitation](adr/0011-gated-tcn-architecture.md)
 -   [ADR 0012: Noise-Resilient Training with DWT and Contrastive Pre-training](adr/0012-noise-resilient-training.md)
 -   [ADR 0013: High-Fidelity Backtesting Methodology](adr/0013-high-fidelity-backtesting.md)
--   [ADR 0014: Cloud-Only Training Enforcement](adr/0014-cloud-only-training-enforcement.md)
+- [ADR 0014: Cloud-Only Training Enforcement](adr/0014-cloud-only-training-enforcement.md)
+- [ADR 0015: Professional-Grade Data Engineering Infrastructure](adr/0015-professional-grade-data-engineering-infrastructure.md)
+
 
 ### Reference
 -   [Deriv API Integration Notes](reference/deriv-api.md)

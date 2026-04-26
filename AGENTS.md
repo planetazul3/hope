@@ -27,11 +27,30 @@ Run `cargo fmt && cargo check --offline && cargo test --offline` before opening 
 Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `snake_case` for functions, modules, and variables, and `PascalCase` for structs and enums. Prefer small, focused types like `WebSocketClientConfig` and `WebSocketEvent`; keep fallible paths returning `anyhow::Result` where that pattern is already in use.
 
 ### Machine Learning Workflow
-1. **Data**: Collect ticks with `make collect`.
-2. **Export**: Convert to CSV with `make export`.
+1. **Data**: Collect ticks with `make collect`. Use `--mode backfill` or `--mode both` for gapless collection.
+2. **Export**: Convert to CSV with `make export`. Use `--incremental` for fast updates and `--validate` to ensure data integrity.
 3. **Training**: Upload `data/ticks.csv` to Google Colab or Kaggle and execute `notebooks/train_transformer.ipynb` in a cloud GPU environment. Invoking `scripts/train_fixed.py` or any other Python training script directly on the local machine is prohibited. All training scripts contain runtime guards that abort execution with a clear error message if a cloud environment (Google Colab or Kaggle) is not detected.
 4. **Deploy**: Ensure `model.onnx` is in the project root.
 5. **Config**: Set `TRANSFORMER_SEQUENCE_LENGTH=32` in `.env`.
+
+## Data Engineering Standards
+Tick collection and export tools must maintain high fidelity, performance, and professional UX:
+- **Storage**: SQLite databases must use a multi-symbol schema (`symbol`, `epoch`, `quote`) with `UNIQUE(symbol, epoch)`. Enable `PRAGMA journal_mode=WAL` and `PRAGMA synchronous=NORMAL` for concurrent I/O.
+- **Architecture**: 
+    - **Separation of Concerns**: Use a class-based, asynchronous approach (e.g., `TickCollector`, `DerivClient`) with discrete execution modes.
+    - **Lifecycle Management**: Implement robust `asyncio` signal handling for `SIGINT` and `SIGTERM` to ensure graceful resource cleanup.
+    - **Memory Efficiency**: Use chunked processing (via `pandas` or generator patterns) to handle datasets larger than available RAM.
+- **Collection**: 
+    - Support `history` (backward), `backfill` (forward from last saved), and `live` (WebSocket subscription) modes.
+    - Implement `both` mode to perform historical backfill followed by a seamless transition to a live stream.
+    - Include a `list` mode for real-time symbol discovery from the Deriv API.
+- **Resilience**: Implement automatic reconnection logic and exponential backoff for WebSocket failures.
+- **Observability**:
+    - **Gap Analysis**: Perform real-time analysis of historical batches to detect and warn about non-sequential data (gaps > 2.1s).
+    - **Progress Tracking**: Use `tqdm` for long-running I/O operations and context-aware logging with the `logging` module.
+- **Export**: Use `pandas` for high-performance I/O. Support streaming Gzip and Parquet formats.
+- **Verification**: Exports must optionally support `--validate` (gap/duplicate detection) and `--stats` (summary statistics and price distribution histograms).
+- **Incremental**: Support `--incremental` export by using low-level file seeking (O(1) complexity) to detect the last epoch in target CSVs.
 
 ## ML Engineering Standards
 All model training and export workflows must adhere to these standards:

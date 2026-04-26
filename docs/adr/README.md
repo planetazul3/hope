@@ -25,3 +25,4 @@ This directory stores Architecture Decision Records (ADRs) for `hope`.
 - [0012 - Noise-Resilient Training with DWT and Contrastive Pre-training](./0012-noise-resilient-training.md)
 - [0013 - High-Fidelity Backtesting Methodology](./0013-high-fidelity-backtesting.md)
 - [0014 - Cloud-Only Training Enforcement](./0014-cloud-only-training-enforcement.md)
+- [0015 - Professional-Grade Data Engineering Infrastructure](./0015-professional-grade-data-engineering-infrastructure.md)

@@ -5,163 +5,264 @@ import argparse
 import sys
 import os
 import time
+import signal
+import logging
+from datetime import datetime
+from typing import List, Optional, Dict, Any
 
 try:
     import websockets
+    from websockets.exceptions import ConnectionClosed
 except ImportError:
     print("ERROR: websockets not installed. Run: pip install websockets", file=sys.stderr)
     sys.exit(1)
 
-# Default configuration
-app_id = os.environ.get("DERIV_APP_ID", "1089")
-DERIV_WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+# --- Configuration & Constants ---
+
+DEFAULT_APP_ID = os.environ.get("DERIV_APP_ID", "1089")
 BATCH_SIZE = 5000
-RATE_LIMIT_SLEEP = 1.5
-TICKS_PER_HOUR = 3600 # Approx for 1s indices
+RATE_LIMIT_SLEEP = 1.0
+RECONNECT_DELAY = 5
 
-def init_db(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS ticks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            epoch REAL NOT NULL,
-            quote REAL NOT NULL,
-            UNIQUE(epoch, quote)
-        )
-    """)
-    conn.commit()
-    return conn
+# Set up professional logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("Collector")
 
-def insert_batch(conn: sqlite3.Connection, epochs: list, quotes: list) -> int:
-    cursor = conn.cursor()
-    cursor.executemany(
-        "INSERT OR IGNORE INTO ticks (epoch, quote) VALUES (?, ?)",
-        zip(epochs, quotes)
+# --- Database Layer ---
+
+class TickStore:
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.conn: Optional[sqlite3.Connection] = None
+        self._init_db()
+
+    def _init_db(self):
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS ticks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                epoch REAL NOT NULL,
+                quote REAL NOT NULL,
+                UNIQUE(symbol, epoch)
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_epoch ON ticks(symbol, epoch)")
+        self.conn.commit()
+
+    def insert_batch(self, symbol: str, epochs: List[float], quotes: List[float]) -> int:
+        if not epochs: return 0
+        try:
+            cursor = self.conn.cursor()
+            data = [(symbol, e, q) for e, q in zip(epochs, quotes)]
+            cursor.executemany(
+                "INSERT OR IGNORE INTO ticks (symbol, epoch, quote) VALUES (?, ?, ?)",
+                data
+            )
+            self.conn.commit()
+            return cursor.rowcount
+        except Exception as e:
+            logger.error(f"Database error: {e}")
+            return 0
+
+    def get_last_epoch(self, symbol: str) -> Optional[float]:
+        cursor = self.conn.execute("SELECT MAX(epoch) FROM ticks WHERE symbol = ?", (symbol,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+
+# --- API Interaction Layer ---
+
+class DerivClient:
+    def __init__(self, app_id: str):
+        self.app_id = app_id
+        self.ws_url = f"wss://ws.derivws.com/websockets/v3?app_id={app_id}"
+        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+
+    async def connect(self):
+        logger.info(f"Connecting to Deriv (AppID: {self.app_id})...")
+        self.ws = await websockets.connect(self.ws_url, ping_interval=20, ping_timeout=10)
+
+    async def disconnect(self):
+        if self.ws:
+            await self.ws.close()
+            self.ws = None
+
+    async def request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.ws: raise RuntimeError("Not connected")
+        if "req_id" not in payload:
+            payload["req_id"] = int(time.time() * 1000) % 10000
+        await self.ws.send(json.dumps(payload))
+        response = json.loads(await self.ws.recv())
+        if "error" in response:
+            raise RuntimeError(f"API Error: {response['error'].get('message')}")
+        return response
+
+# --- Logic Layer ---
+
+class CollectionService:
+    def __init__(self, client: DerivClient, store: TickStore, symbol: str):
+        self.client = client
+        self.store = store
+        self.symbol = symbol
+        self.shutdown_event = asyncio.Event()
+
+    async def interruptible_sleep(self, seconds: float):
+        """Sleep that can be interrupted by the shutdown event."""
+        try:
+            await asyncio.wait_for(self.shutdown_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass # Normal timeout, continue
+
+    async def list_active_symbols(self):
+        payload = {"active_symbols": "brief", "product_type": "basic", "landing_company": "svg"}
+        resp = await self.client.request(payload)
+        symbols = [s for s in resp["active_symbols"] if s["market"] == "synthetic_index"]
+        print(f"\n{'Symbol':<15} | {'Display Name':<30}")
+        print("-" * 50)
+        for s in sorted(symbols, key=lambda x: x['symbol']):
+            print(f"{s['symbol']:<15} | {s['display_name']:<30}")
+        print("-" * 50)
+
+    async def collect_history(self, target_count: Optional[int] = None, hours: Optional[float] = None):
+        logger.info(f"Starting HISTORY collection for {self.symbol}")
+        boundary = time.time() - (hours * 3600) if hours else None
+        total_new, current_end, prev_oldest = 0, "latest", None
+        empty_batches = 0
+
+        while not self.shutdown_event.is_set():
+            try:
+                resp = await self.client.request({
+                    "ticks_history": self.symbol, 
+                    "style": "ticks", 
+                    "end": current_end, 
+                    "count": BATCH_SIZE
+                })
+                history = resp.get("history", {})
+                times, prices = history.get("times", []), history.get("prices", [])
+
+                if not times:
+                    logger.info("History exhausted (empty response).")
+                    break
+
+                inserted = self.store.insert_batch(self.symbol, times, prices)
+                total_new += inserted
+                oldest = min(times)
+                logger.info(f"[{self.symbol}] Batch: {len(times)} | New: {inserted} | Oldest: {datetime.fromtimestamp(oldest)}")
+
+                # Termination conditions
+                if oldest == prev_oldest:
+                    logger.info("Oldest tick unchanged, stopping.")
+                    break
+                
+                if prev_oldest and oldest > prev_oldest:
+                    logger.warning(f"API returned forward-jumping data ({oldest} > {prev_oldest}). Possible rate limit reset or connection issue. Stopping history mode.")
+                    break
+
+                if inserted == 0:
+                    empty_batches += 1
+                    if empty_batches >= 2:
+                        logger.info("Hit existing data (2 consecutive batches with 0 new ticks). Stopping.")
+                        break
+                else:
+                    empty_batches = 0
+
+                if (target_count and total_new >= target_count) or (boundary and oldest <= boundary):
+                    logger.info("Requested target or time boundary reached.")
+                    break
+
+                if len(times) < BATCH_SIZE * 0.9:
+                    logger.info(f"Received partial batch ({len(times)} < {BATCH_SIZE}). This is likely the end of available history.")
+                    break
+
+                current_end, prev_oldest = str(int(oldest)), oldest
+                await self.interruptible_sleep(RATE_LIMIT_SLEEP)
+            except Exception as e:
+                logger.error(f"History fetch error: {e}")
+                break
+
+    async def run_live(self):
+        logger.info(f"Starting LIVE subscription for {self.symbol}")
+        while not self.shutdown_event.is_set():
+            try:
+                await self.client.ws.send(json.dumps({"ticks": self.symbol, "subscribe": 1}))
+                async for message in self.client.ws:
+                    if self.shutdown_event.is_set(): break
+                    data = json.loads(message)
+                    if data.get("msg_type") == "tick":
+                        t = data["tick"]
+                        self.store.insert_batch(self.symbol, [t["epoch"]], [t["quote"]])
+                        if int(t["epoch"]) % 100 == 0:
+                            logger.info(f"Live Tick: {self.symbol} @ {t['quote']}")
+            except (ConnectionClosed, Exception) as e:
+                if self.shutdown_event.is_set(): break
+                logger.warning(f"Live connection lost ({e}). Reconnecting...")
+                await asyncio.sleep(RECONNECT_DELAY)
+                await self.client.connect()
+
+    def signal_shutdown(self):
+        logger.info("Shutdown signal received. Cleaning up...")
+        self.shutdown_event.set()
+        # To break out of blocking recv()
+        if self.client.ws:
+            asyncio.create_task(self.client.ws.close())
+
+async def main():
+    parser = argparse.ArgumentParser(
+        description="Professional Deriv Tick Collector: A robust, asynchronous service for historical backfilling and live data ingestion.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Operation Modes:
+  history   Fetch historical ticks backwards from 'latest' until --count or --hours is reached.
+  live      Subscribe to a real-time WebSocket stream for continuous data ingestion.
+  both      Perform a historical backfill first, then seamlessly transition to live subscription.
+  list      Query the Deriv API for all available Synthetic Index symbols and exit.
+
+Examples:
+  python3 scripts/tick_collector.py --mode list
+  python3 scripts/tick_collector.py --symbol 1HZ100V --mode history --hours 24
+  python3 scripts/tick_collector.py --symbol R_100 --mode both
+        """
     )
-    conn.commit()
-    return conn.execute("SELECT changes()").fetchone()[0]
-
-async def fetch_batch(ws, symbol: str, end_epoch: int = None) -> dict:
-    request = {
-        "ticks_history": symbol,
-        "style": "ticks",
-        "end": end_epoch if end_epoch is not None else "latest",
-        "count": BATCH_SIZE,
-        "req_id": int(time.time() * 1000) % 10000,
-    }
-
-    await ws.send(json.dumps(request))
-    raw = await ws.recv()
-    response = json.loads(raw)
-
-    if "error" in response:
-        raise RuntimeError(
-            f"API error: {response['error']['code']} — {response['error']['message']}"
-        )
-
-    if response.get("msg_type") != "history":
-        raise RuntimeError(f"Unexpected message type: {response.get('msg_type')}")
-
-    return response["history"]
-
-async def collect_ticks(symbol: str, target_count: int, db_path: str, hours: float = None):
-    window_start_epoch = int(time.time()) - int(hours * 3600) if hours else None
-    if hours:
-        target_count = int(hours * TICKS_PER_HOUR)
-        print(f"Time-window mode: {hours}h window → ~{target_count:,} target ticks")
-    
-    conn = init_db(db_path)
-    cursor = conn.execute("SELECT COUNT(*) FROM ticks")
-    existing = cursor.fetchone()[0]
-    print(f"Existing ticks in DB: {existing:,}")
-
-    total_inserted = 0
-    end_epoch = None
-    prev_oldest_epoch = None
-    batch_num = 0
-
-    print(f"Connecting to: {DERIV_WS_URL}")
-    print(f"Starting collection: symbol={symbol}, target={target_count:,}, db={db_path}")
-    print("Press Ctrl+C to stop gracefully.")
-
-    try:
-        async with websockets.connect(DERIV_WS_URL) as ws:
-            while total_inserted < target_count:
-                batch_num += 1
-                print(f"Batch {batch_num}: requesting {BATCH_SIZE} ticks"
-                      + (f" ending at epoch {end_epoch}" if end_epoch is not None else " (latest)"))
-
-                try:
-                    history = await fetch_batch(ws, symbol, end_epoch)
-                except Exception as e:
-                    print(f"Fetch failed: {e}")
-                    break
-
-                epochs = history["times"]
-                quotes = history["prices"]
-
-                if not epochs:
-                    print("No ticks returned — server history limit reached.")
-                    break
-
-                oldest_epoch = min(epochs)
-
-                if oldest_epoch == prev_oldest_epoch:
-                    print(f"Oldest epoch unchanged ({oldest_epoch}) — server history exhausted.")
-                    break
-
-                if window_start_epoch and oldest_epoch < window_start_epoch:
-                    # Still insert the current batch but stop after
-                    insert_batch(conn, epochs, quotes)
-                    print(f"Reached window boundary (epoch {window_start_epoch}) — stopping.")
-                    break
-
-                inserted = insert_batch(conn, epochs, quotes)
-                total_inserted += inserted
-
-                print(
-                    f"  → Received {len(epochs)} ticks, inserted {inserted} new | "
-                    f"oldest epoch: {oldest_epoch} | total inserted: {total_inserted:,}"
-                )
-
-                prev_oldest_epoch = oldest_epoch
-                end_epoch = oldest_epoch
-
-                if len(epochs) < BATCH_SIZE:
-                    print("Received fewer ticks than batch size — history exhausted.")
-                    break
-
-                if total_inserted < target_count:
-                    print(f"  Sleeping {RATE_LIMIT_SLEEP}s (rate limit)...")
-                    await asyncio.sleep(RATE_LIMIT_SLEEP)
-                    
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        print("\nInterrupt received, shutting down gracefully...")
-    except Exception as e:
-        print(f"\nUnexpected error: {e}")
-    finally:
-        final_count = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
-        conn.close()
-        print(f"\nSummary: Batches: {batch_num}, new ticks inserted: {total_inserted:,}, "
-              f"total in DB: {final_count:,}")
-
-async def main_async():
-    parser = argparse.ArgumentParser(description="Deriv tick collector")
-    parser.add_argument("--symbol", default="1HZ90V", help="Deriv symbol (default: 1HZ90V)")
-    parser.add_argument("--count", type=int, default=86400, help="Target ticks (default: 86400 for 24h)")
-    parser.add_argument("--db", default="data/tick_store.db", help="DB path")
-    parser.add_argument("--hours", type=float, default=24, help="Last N hours")
+    parser.add_argument("--symbol", default="1HZ100V", help="Deriv symbol to collect (default: 1HZ100V)")
+    parser.add_argument("--db", default="data/tick_store.db", help="Path to SQLite database (default: data/tick_store.db)")
+    parser.add_argument("--mode", choices=["history", "live", "both", "list"], default="history", help="Collection strategy")
+    parser.add_argument("--hours", type=float, help="History window size in hours")
+    parser.add_argument("--count", type=int, help="Target number of historical ticks to collect")
     args = parser.parse_args()
 
+    client, store = DerivClient(DEFAULT_APP_ID), TickStore(args.db)
+    service = CollectionService(client, store, args.symbol)
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, service.signal_shutdown)
+
     try:
-        await collect_ticks(
-            symbol=args.symbol,
-            target_count=args.count,
-            db_path=args.db,
-            hours=args.hours,
-        )
-    except KeyboardInterrupt:
-        pass
+        await client.connect()
+        if args.mode == "list": await service.list_active_symbols()
+        elif args.mode == "history": await service.collect_history(target_count=args.count, hours=args.hours)
+        elif args.mode == "live": await service.run_live()
+        elif args.mode == "both":
+            await service.collect_history(target_count=args.count, hours=args.hours)
+            if not service.shutdown_event.is_set(): await service.run_live()
+    finally:
+        await client.disconnect()
+        store.close()
+        logger.info("Exited safely.")
 
 if __name__ == "__main__":
-    asyncio.run(main_async())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
