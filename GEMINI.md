@@ -36,9 +36,9 @@ Target Rust 2021 and follow `rustfmt` defaults with 4-space indentation. Use `sn
 ### Machine Learning Workflow
 1. **Data**: Collect ticks with `make collect`. Use `--mode backfill` or `--mode both` for gapless collection.
 2. **Export**: Convert to CSV with `make export`. Use `--incremental` for fast updates and `--validate` to ensure data integrity.
-3. **Training**: Upload `data/ticks.csv` to Google Colab or Kaggle and execute `notebooks/train_transformer.ipynb` in a cloud GPU environment. Invoking `scripts/train_fixed.py` or any other Python training script directly on the local machine is prohibited. All training scripts contain runtime guards that abort execution with a clear error message if a cloud environment (Google Colab or Kaggle) is not detected.
-4. **Deploy**: Ensure `model.onnx` is in the project root.
-5. **Config**: Set `TRANSFORMER_SEQUENCE_LENGTH=32` in `.env`.
+3. **Training**: Execute `notebooks/colab_training.ipynb` or `notebooks/kaggle_training.ipynb` in their respective cloud GPU environments. Invoking any Python training script directly on the local machine is prohibited.
+4. **Deploy**: Ensure `model.onnx` and `model.onnx.sig` are in the project root.
+5. **Config**: Set `TRANSFORMER_SEQUENCE_LENGTH=32` and `MODEL_PUBLIC_KEY` in `.env`.
 
 ## Data Engineering Standards
 Tick collection and export tools must maintain high fidelity, performance, and professional UX:
@@ -61,12 +61,12 @@ Tick collection and export tools must maintain high fidelity, performance, and p
 
 ## ML Engineering Standards
 All model training and export workflows must adhere to these standards:
-- **Architecture**: Use Gated TCN with Causal Dilated Convolutions and SE Attention (V4).
-- **Optimization**: Training loops must use a two-phase curriculum starting with Contrastive Pre-training (InfoNCE) and then Supervised Fine-tuning with Focal Loss and Volatility MSE, using ReduceLROnPlateau and warmup scheduler.
-- **Features**: Preprocessing must include 8 features: 5 base features, 2 Haar Wavelet DWT coefficients A1 and D1, and 1 short-to-long-term volatility ratio.
+- **Architecture**: Canonical Causal Transformer Encoder ($L=32$, $O(L^2)$ mathematical optimality) with a prepended `[CLS]` token.
+- **Optimization**: Training loops must use a two-phase curriculum starting with Contrastive Pre-training (TS2Vec: Hierarchical Contrastive Learning with latent-space timestamp masking and random cropping using InfoNCE loss) and then Supervised Fine-tuning with Focal Loss and Volatility Huber Loss, using ReduceLROnPlateau and warmup scheduler.
+- **Features**: Preprocessing must include 8 features: 5 base features, 2 Daubechies (db2/db3) wavelet coefficients A1 and D1 computed as $O(N)$ FIR filter banks, and 1 short-to-long-term volatility ratio.
 - **Batching**: Use PyTorch `DataLoader` and `TensorDataset`.
 - **Integrity**: Always load the best recorded state dictionary before exporting to ONNX.
-- **Export**: ONNX models must use a static batch size of 1 and exclude auxiliary heads.
+- **Export**: ONNX models must use static graphs (batch size 1, sequence length 32) and dynamic INT8 Quantization (`QuantType.QInt8`).
 - **Balance**: Loss functions must use Focal Loss with Label Smoothing.
 
 ## Testing Guidelines

@@ -30,6 +30,7 @@ Build a deterministic, auditable, low-latency trading system for Deriv synthetic
 - Strategy consumes normalized tick state
 - Model remains a replaceable probability provider
 - System invariants never depend on probabilistic behavior
+- Features a Dual-Engine approach: TS2Vec for implicit contextual representation combined with Daubechies wavelets for explicit time-frequency extraction.
 
 ### 4. Execution and Risk
 

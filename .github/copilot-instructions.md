@@ -12,5 +12,5 @@ Key rules for this repository:
 - Prefer deterministic, auditable changes. Do not invent Deriv API fields or undocumented behavior.
 - Run `cargo fmt`, `cargo check --offline`, and `cargo test --offline` when applicable before claiming completion.
 - Adhere to the **ML Engineering Standards** (Architecture, Optimization, Features, Batching, Integrity, Export, Balance) defined in `AGENTS.md`.
-- Local execution of any training script, including `scripts/train_fixed.py`, is prohibited. All model training must be performed in a cloud GPU environment (Google Colab or Kaggle). The `make train` target must not invoke any training script locally.
+- Local execution of any training script is prohibited. All model training must be performed in a cloud GPU environment (Google Colab or Kaggle). The `make train` target must not invoke any training script locally.
 - Use `python3 consolidate_project_sources.py` or `make consolidate` when generating an auditable project snapshot that includes notebooks.

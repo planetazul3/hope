@@ -12,9 +12,9 @@ Status values:
 
 ## Current Stage Summary
 
-- Current active stage: `Stage 12 - Production Hardening` (Planned)
-- Previous stage: `Stage 11 - ML Quality and Cloud Enforcement` (Done)
-- Overall state: Production-ready modular engine with zero-allocation hot paths, verified backtesting capabilities, and a standardized, observable ML pipeline with noise-resilient GatedTCN V4 architecture.
+- Current active stage: `Stage 13 - Live Trading Deployment and Anomaly Monitoring` (In Progress)
+- Previous stage: `Stage 12 - Production Hardening` (Done)
+- Overall state: Production-ready modular engine with zero-allocation hot paths, verified backtesting capabilities, and a standardized, observable ML pipeline backed by Canonical Causal Transformer and TS2Vec.
 
 ## Stage 1 - Deterministic Core Foundation
 
@@ -91,3 +91,17 @@ Status: `Done`
 - [x] Decision threshold sweep for empirical boundary selection and `.env` recommendation
 - [x] DataLoader parallel data loading with `num_workers=2` and `pin_memory=True`
 - [x] Comprehensive ML utility unit tests for `hope_ml.common` public API
+
+## Stage 12 - Production Hardening
+
+Status: `Done`
+
+- [x] Integrate Canonical Causal Transformer with `[CLS]` token pooling and TS2Vec contrastive pre-training
+- [x] Implement Daubechies (db2/db3) wavelet coefficients as $O(N)$ FIR filter banks
+- [x] Zero-Allocation Rust paths for ONNX inference (`tract-onnx` and `StrategyEngine`)
+- [x] Implement professional-grade UX logging and progress bars (`tqdm`)
+- [x] Dynamic INT8 model quantization and Ed25519 cryptographic signing enforcement
+
+## Stage 13 - Live Trading Deployment and Anomaly Monitoring
+
+Status: `In Progress`

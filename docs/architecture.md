@@ -22,9 +22,9 @@ The two engines are synchronized through **Feature Parity** (identical mathemati
 - **Execution & Risk**: `src/execution.rs` and `src/risk.rs` provide rate-limiting guards and consecutive-loss protection.
 
 ### 3. Machine Learning Gear (PyTorch/ONNX)
-- **Architecture**: GatedTCN V4 (Noise-Resilient Learning) with 4-layer Causal Dilated Convolutions and SE channel attention.
-- **Training**: Two-phase curriculum (Contrastive Pre-training + Supervised Fine-tuning) performed exclusively in cloud GPU environments.
-- **Interchange**: Models are exported to ONNX for low-latency CPU inference via the `tract` engine in Rust.
+- **Architecture**: Canonical Causal Transformer Encoder ($L=32$, $O(L^2)$ mathematical optimality) with a prepended `[CLS]` token.
+- **Training**: Two-phase curriculum starting with Contrastive Pre-training (TS2Vec: Hierarchical Contrastive Learning with latent-space timestamp masking and random cropping using InfoNCE loss) and then Supervised Fine-tuning with Focal Loss and Volatility Huber Loss. Training is performed exclusively in cloud GPU environments.
+- **Interchange**: Models are exported to ONNX (static graph: 1x32x8) and dynamically quantized to INT8 (`QuantType.QInt8`) for low-latency CPU inference via the `tract` engine in Rust.
 
 ## Data & Storage Layer
 
@@ -34,7 +34,7 @@ The two engines are synchronized through **Feature Parity** (identical mathemati
 
 ## Operational Constraints
 
-- **Zero Allocation**: No dynamic heap allocations in the hot path (Tick -> Strategy -> Signal).
+- **Zero Allocation Hot Path**: The `tract-onnx` execution environment operates on a strictly zero-allocation hot path using pre-allocated `ndarray` buffers during the Tick -> Strategy -> Signal flow.
 - **FSM-Strict**: "One Trade at a Time" enforcement and mandatory cooldown periods.
 - **Complexity**: O(1) complexity for all per-tick statistical calculations.
 - **Security**: Asynchronous audit logging with restrictive file permissions (`0o600`).
