@@ -38,6 +38,7 @@ impl TradingFsm {
         let valid = matches!(
             (self.state, next),
             (TradingState::Idle, TradingState::OrderPending)
+                | (TradingState::Idle, TradingState::InPosition)
                 | (TradingState::Idle, TradingState::Cooldown)
                 | (TradingState::OrderPending, TradingState::InPosition)
                 | (TradingState::OrderPending, TradingState::Idle)
@@ -71,9 +72,10 @@ mod tests {
     #[test]
     fn rejects_invalid_transitions() {
         let mut fsm = TradingFsm::new();
+        fsm.transition(TradingState::Cooldown).unwrap();
 
         assert!(fsm.transition(TradingState::InPosition).is_err());
-        assert_eq!(fsm.state(), TradingState::Idle);
+        assert_eq!(fsm.state(), TradingState::Cooldown);
     }
 
     #[test]
@@ -85,5 +87,12 @@ mod tests {
         fsm.transition(TradingState::Idle).unwrap();
 
         assert_eq!(fsm.state(), TradingState::Idle);
+    }
+
+    #[test]
+    fn accepts_idle_to_in_position_for_delayed_fills() {
+        let mut fsm = TradingFsm::new();
+        fsm.transition(TradingState::InPosition).unwrap();
+        assert_eq!(fsm.state(), TradingState::InPosition);
     }
 }

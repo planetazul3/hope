@@ -258,6 +258,20 @@ impl DerivWebSocketClient {
                         &self.dropped_events,
                     )?;
 
+                    for &contract_id in &tracked_contracts {
+                        self.send_json(
+                            &mut write,
+                            &ProposalOpenContractRequest {
+                                proposal_open_contract: 1,
+                                contract_id,
+                                subscribe: 1,
+                                req_id: Some(self.next_req_id()),
+                            },
+                        )
+                        .await
+                        .context("failed to resubscribe to open contract")?;
+                    }
+
                     loop {
                         tokio::select! {
                             maybe_command = command_rx.recv() => {

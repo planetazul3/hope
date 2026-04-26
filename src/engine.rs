@@ -206,6 +206,7 @@ impl Engine {
                             warn!("order pending timeout exceeded; resetting to idle");
                             safe_reset(&mut self.fsm);
                             self.order_sent_at = None;
+                            self.pending_req_id = None;
                         }
                     }
 

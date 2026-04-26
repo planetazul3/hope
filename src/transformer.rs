@@ -75,7 +75,8 @@ impl TransformerModel {
                 let d1 = (x_t - x_prev) / 2.0_f64.sqrt();
 
                 // Normalizing A1 by price level to keep it scale-invariant
-                self.data_buffer.push((a1 / x_t) as f32);
+                let a1_norm = if x_t == 0.0 { 0.0 } else { (a1 / x_t) as f32 };
+                self.data_buffer.push(a1_norm);
                 self.data_buffer.push(d1 as f32);
             } else {
                 self.data_buffer.push(0.0);

@@ -24,18 +24,18 @@ fmt:
 	$(CARGO) fmt
 
 check:
-	$(CARGO) check --offline
+	$(CARGO) check --locked --offline
 
 test:
-	$(CARGO) test --offline
+	$(CARGO) test --locked --offline
 
 verify: fmt check test
 
 run:
-	$(CARGO) run --offline
+	$(CARGO) run --locked --offline
 
 backtest:
-	$(CARGO) run --bin backtest --offline
+	$(CARGO) run --bin backtest --locked --offline
 
 train:
 	@echo "NOTICE: Invoking scripts/train_fixed.py directly on a local machine is prohibited by project policy (see AGENTS.md)."
