@@ -3,7 +3,7 @@ PYTHON ?= python3
 CARGO  ?= cargo
 SYMBOL ?= 
 
-.PHONY: help fmt check test verify run backtest export collect consolidate setup clean restore-nb
+.PHONY: help fmt check test test-py verify run backtest export collect consolidate setup clean
 
 # Default target
 help:
@@ -11,12 +11,12 @@ help:
 	@echo "=========================================="
 	@echo "fmt         : Format source code"
 	@echo "check       : Run cargo check (offline)"
-	@echo "test        : Run unit tests (offline)"
+	@echo "test        : Run Rust unit tests (offline)"
+	@echo "test-py     : Run Python unit tests"
 	@echo "verify      : Format, check, and test everything"
 	@echo "run         : Start the trading engine"
 	@echo "backtest    : Run strategy backtesting on data/ticks.csv"
 	@echo "export      : Export ticks from SQLite to data/ticks.csv (use SYMBOL=R_100)"
-	@echo "restore-nb  : Regenerate notebooks/train_transformer.ipynb from template"
 	@echo "collect     : Collect historical ticks from Deriv API"
 	@echo "consolidate : Generate an audit snapshot of the project"
 	@echo "setup       : Install Python dependencies from requirements.txt"
@@ -31,7 +31,10 @@ check:
 test:
 	$(CARGO) test --locked --offline
 
-verify: fmt check test
+test-py:
+	$(PYTHON) -m pytest tests/
+
+verify: fmt check test test-py
 
 run:
 	$(CARGO) run --locked --offline
@@ -41,24 +44,20 @@ backtest:
 
 train:
 	@echo "NOTICE: Invoking scripts/train_fixed.py directly on a local machine is prohibited by project policy (see AGENTS.md)."
-	@echo "Upload data/ticks.csv to Google Colab or Kaggle and execute notebooks/train_transformer.ipynb in a cloud GPU environment."
+	@echo "Upload data/ticks.csv to Google Colab or Kaggle and execute notebooks/colab_training.ipynb or notebooks/kaggle_training.ipynb in a cloud GPU environment."
 	@echo "All training scripts contain runtime guards that abort execution if a cloud environment is not detected."
 
 export:
 	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
 	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-R_100}}; \
 	echo "Exporting ticks for symbol: $$TARGET_SYMBOL"; \
-	$(PYTHON) scripts/export_db.py --symbol $$TARGET_SYMBOL
+	$(PYTHON) scripts/export_db.py --symbol $$TARGET_SYMBOL --incremental --validate
 
 collect:
 	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
-	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-1HZ100V}}; \
+	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-R_100}}; \
 	echo "Collecting ticks for symbol: $$TARGET_SYMBOL"; \
-	$(PYTHON) scripts/tick_collector.py --symbol $$TARGET_SYMBOL --hours 24
-
-restore-nb:
-	$(PYTHON) restore_nb.py
-	@echo "Notebook restored. Run 'git add notebooks/' to commit."
+	$(PYTHON) scripts/tick_collector.py --symbol $$TARGET_SYMBOL --mode both
 
 consolidate:
 	$(PYTHON) consolidate_project_sources.py
