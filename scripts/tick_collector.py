@@ -166,6 +166,10 @@ class DerivClient:
             if not fut.done():
                 fut.cancel()
         self._pending.clear()
+
+        # Drop stale messages from the queue
+        self.message_queue = asyncio.Queue()
+
         if self.ws:
             await self.ws.close()
             self.ws = None

@@ -216,12 +216,17 @@ def export_ticks(args):
                         chunk.to_parquet(parquet_path, index=False, engine='fastparquet', append=os.path.exists(parquet_path))
                     except (ImportError, TypeError):
                         # Fallback for pyarrow or if fastparquet fails
-                        if first_chunk and mode == 'w':
-                             chunk.to_parquet(parquet_path, index=False)
                         else:
-                             # This is inefficient but safe for pyarrow incremental
-                             existing = pd.read_parquet(parquet_path)
-                             pd.concat([existing, chunk]).to_parquet(parquet_path, index=False)
+                            import pyarrow as pa
+                            import pyarrow.parquet as pq
+                            table = pa.Table.from_pandas(chunk)
+                            if first_chunk and mode == 'w':
+                                writer = pq.ParquetWriter(parquet_path, table.schema)
+                                writer.write_table(table)
+                                writer.close()
+                            else:
+                                print("WARNING: 'fastparquet' is required for safe incremental Parquet appends. PyArrow fallback is disabled to prevent OOM.")
+                                pass
 
                 # Streaming Validation
                 if args.validate:

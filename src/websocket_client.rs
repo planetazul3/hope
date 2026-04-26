@@ -224,127 +224,16 @@ impl DerivWebSocketClient {
 
             match connect_async(ws_url.as_str()).await {
                 Ok((stream, _)) => {
-                    try_emit(
-                        &event_tx,
-                        WebSocketEvent::Status(ConnectionStatus::Connected),
-                        &self.dropped_events,
-                    )?;
-                    info!("connected to Deriv websocket");
-
-                    let (mut write, mut read) = stream.split();
-                    self.send_json(
-                        &mut write,
-                        &AuthorizeRequest {
-                            authorize: &self.cfg.token,
-                            req_id: Some(self.next_req_id()),
-                        },
-                    )
-                    .await
-                    .context("failed to authorize websocket session")?;
-
-                    self.send_json(
-                        &mut write,
-                        &TicksRequest {
-                            ticks: &self.cfg.symbol,
-                            subscribe: 1,
-                            req_id: Some(self.next_req_id()),
-                        },
-                    )
-                    .await
-                    .context("failed to subscribe to ticks")?;
-                    try_emit(
-                        &event_tx,
-                        WebSocketEvent::Status(ConnectionStatus::SubscribedTicks),
-                        &self.dropped_events,
-                    )?;
-
-                    for &contract_id in &tracked_contracts {
-                        self.send_json(
-                            &mut write,
-                            &ProposalOpenContractRequest {
-                                proposal_open_contract: 1,
-                                contract_id,
-                                subscribe: 1,
-                                req_id: Some(self.next_req_id()),
-                            },
+                    if let Err(err) = self
+                        .handle_connection(
+                            stream,
+                            &event_tx,
+                            &mut command_rx,
+                            &mut tracked_contracts,
                         )
                         .await
-                        .context("failed to resubscribe to open contract")?;
-                    }
-
-                    loop {
-                        tokio::select! {
-                            maybe_command = command_rx.recv() => {
-                                let Some(command) = maybe_command else {
-                                    return Ok(());
-                                };
-
-                                match command {
-                                    WebSocketCommand::RequestProposal { proposal, req_id } => {
-                                        let request = ProposalRequest {
-                                            proposal: 1,
-                                            amount: proposal.amount,
-                                            basis: "stake",
-                                            contract_type: &proposal.contract_type,
-                                            currency: &proposal.currency,
-                                            duration: proposal.duration_ticks,
-                                            duration_unit: "t",
-                                            symbol: &proposal.symbol,
-                                            req_id: Some(req_id),
-                                        };
-                                        self.send_json(&mut write, &request).await?;
-                                    }
-                                    WebSocketCommand::Buy { proposal_id, price, req_id } => {
-                                        self.send_json(&mut write, &BuyRequest {
-                                            buy: &proposal_id,
-                                            price,
-                                            req_id: Some(req_id),
-                                        }).await?;
-                                    }
-                                    WebSocketCommand::SubscribeOpenContract { contract_id, req_id } => {
-                                        tracked_contracts.insert(contract_id);
-                                        self.send_json(&mut write, &ProposalOpenContractRequest {
-                                            proposal_open_contract: 1,
-                                            contract_id,
-                                            subscribe: 1,
-                                            req_id: Some(req_id),
-                                        }).await?;
-                                    }
-                                    WebSocketCommand::ClearTrackedContract { contract_id } => {
-                                        tracked_contracts.remove(&contract_id);
-                                    }
-                                }
-                            }
-                            frame = read.next() => {
-                                match frame {
-                                    Some(Ok(Message::Text(text))) => {
-                                        self.route_message(&event_tx, &text).await?;
-                                    }
-                                    Some(Ok(Message::Ping(payload))) => {
-                                        debug!(size = payload.len(), "received ping");
-                                    }
-                                    Some(Ok(Message::Pong(payload))) => {
-                                        debug!(size = payload.len(), "received pong");
-                                    }
-                                    Some(Ok(Message::Close(frame))) => {
-                                        warn!(?frame, "server closed websocket");
-                                        break;
-                                    }
-                                    Some(Ok(Message::Binary(_))) => {
-                                        debug!("ignoring binary frame");
-                                    }
-                                    Some(Ok(_)) => {}
-                                    Some(Err(err)) => {
-                                        error!(error = %err, "websocket read failed");
-                                        break;
-                                    }
-                                    None => {
-                                        warn!("websocket stream ended");
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                    {
+                        error!(error = %err, "connection handler failed; dropping connection");
                     }
                 }
                 Err(err) => {
@@ -357,7 +246,149 @@ impl DerivWebSocketClient {
                 WebSocketEvent::Status(ConnectionStatus::Disconnected),
                 &self.dropped_events,
             )?;
-            tokio::time::sleep(self.cfg.reconnect_backoff).await;
+
+            // Non-blocking drain loop: poll command_rx while waiting for reconnect.
+            // This prevents the channel from filling up and leaking memory in tracked_contracts.
+            let backoff_timer = tokio::time::sleep(self.cfg.reconnect_backoff);
+            tokio::pin!(backoff_timer);
+            loop {
+                tokio::select! {
+                    _ = &mut backoff_timer => break,
+                    maybe_cmd = command_rx.recv() => {
+                        if let Some(WebSocketCommand::ClearTrackedContract { contract_id }) = maybe_cmd {
+                            tracked_contracts.remove(&contract_id);
+                        }
+                        // Ignore other commands during disconnection
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_connection(
+        &self,
+        stream: tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        event_tx: &mpsc::Sender<WebSocketEvent>,
+        command_rx: &mut mpsc::Receiver<WebSocketCommand>,
+        tracked_contracts: &mut BTreeSet<u64>,
+    ) -> Result<()> {
+        try_emit(
+            event_tx,
+            WebSocketEvent::Status(ConnectionStatus::Connected),
+            &self.dropped_events,
+        )?;
+        info!("connected to Deriv websocket");
+
+        let (mut write, mut read) = stream.split();
+        self.send_json(
+            &mut write,
+            &AuthorizeRequest {
+                authorize: &self.cfg.token,
+                req_id: Some(self.next_req_id()),
+            },
+        )
+        .await
+        .context("failed to authorize websocket session")?;
+
+        self.send_json(
+            &mut write,
+            &TicksRequest {
+                ticks: &self.cfg.symbol,
+                subscribe: 1,
+                req_id: Some(self.next_req_id()),
+            },
+        )
+        .await
+        .context("failed to subscribe to ticks")?;
+
+        try_emit(
+            event_tx,
+            WebSocketEvent::Status(ConnectionStatus::SubscribedTicks),
+            &self.dropped_events,
+        )?;
+
+        for &contract_id in &*tracked_contracts {
+            self.send_json(
+                &mut write,
+                &ProposalOpenContractRequest {
+                    proposal_open_contract: 1,
+                    contract_id,
+                    subscribe: 1,
+                    req_id: Some(self.next_req_id()),
+                },
+            )
+            .await
+            .context("failed to resubscribe to open contract")?;
+        }
+
+        loop {
+            tokio::select! {
+                maybe_command = command_rx.recv() => {
+                    let Some(command) = maybe_command else {
+                        return Ok(());
+                    };
+
+                    match command {
+                        WebSocketCommand::RequestProposal { proposal, req_id } => {
+                            let request = ProposalRequest {
+                                proposal: 1,
+                                amount: proposal.amount,
+                                basis: "stake",
+                                contract_type: &proposal.contract_type,
+                                currency: &proposal.currency,
+                                duration: proposal.duration_ticks,
+                                duration_unit: "t",
+                                symbol: &proposal.symbol,
+                                req_id: Some(req_id),
+                            };
+                            self.send_json(&mut write, &request).await?;
+                        }
+                        WebSocketCommand::Buy { proposal_id, price, req_id } => {
+                            self.send_json(&mut write, &BuyRequest {
+                                buy: &proposal_id,
+                                price,
+                                req_id: Some(req_id),
+                            }).await?;
+                        }
+                        WebSocketCommand::SubscribeOpenContract { contract_id, req_id } => {
+                            tracked_contracts.insert(contract_id);
+                            self.send_json(&mut write, &ProposalOpenContractRequest {
+                                proposal_open_contract: 1,
+                                contract_id,
+                                subscribe: 1,
+                                req_id: Some(req_id),
+                            }).await?;
+                        }
+                        WebSocketCommand::ClearTrackedContract { contract_id } => {
+                            tracked_contracts.remove(&contract_id);
+                        }
+                    }
+                }
+                frame = read.next() => {
+                    match frame {
+                        Some(Ok(Message::Text(text))) => {
+                            self.route_message(event_tx, &text).await?;
+                        }
+                        Some(Ok(Message::Ping(_))) => {}
+                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Close(frame))) => {
+                            warn!(?frame, "server closed websocket");
+                            return Ok(());
+                        }
+                        Some(Ok(Message::Binary(_))) => {}
+                        Some(Ok(_)) => {}
+                        Some(Err(err)) => {
+                            return Err(anyhow!(err).context("websocket read failed"));
+                        }
+                        None => {
+                            warn!("websocket stream ended");
+                            return Ok(());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -376,12 +407,21 @@ impl DerivWebSocketClient {
         let req_id = envelope.req_id;
 
         if let Some(error) = envelope.error {
-            error!(?req_id, code = ?error.code, message = ?error.message, "api error received");
+            let safe_message = error.message.as_deref().map(|m| {
+                if m.to_lowercase().contains("token") {
+                    "[REDACTED: Potential Token Leakage]".to_string()
+                } else {
+                    m.to_string()
+                }
+            });
+
+            error!(?req_id, code = ?error.code, message = ?safe_message, "api error received");
+
             try_emit(
                 event_tx,
                 WebSocketEvent::ApiError(ApiErrorEvent {
                     code: error.code,
-                    message: error.message,
+                    message: safe_message,
                     req_id,
                 }),
                 &self.dropped_events,

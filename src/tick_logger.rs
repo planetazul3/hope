@@ -64,7 +64,10 @@ impl TickLogger {
                 if writer.write_all(line.as_bytes()).is_err() {
                     break;
                 }
-                // Removed explicit flush to prevent high I/O overhead
+                // Smart Flush: If the channel is empty, flush the buffer to disk.
+                if rx.try_recv().is_err() {
+                    let _ = writer.flush();
+                }
             }
         });
 

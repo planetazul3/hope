@@ -85,6 +85,16 @@ def main():
     
     # Mixed Precision Setup
     scaler = torch.cuda.amp.GradScaler()
+    
+    # Calculate class imbalance for Focal Loss
+    num_pos = torch.sum(y_dir_all[:split]).item()
+    if num_pos == 0:
+        print("WARNING: No positive labels found in training split. Setting pos_weight to 1.0.")
+        pos_weight = 1.0
+    else:
+        # Ratio of negative to positive samples
+        pos_weight = (split - num_pos) / num_pos
+    
     pos_weight_t = torch.tensor([pos_weight], dtype=torch.float32, device=device)
 
     early_stop_patience = 5
@@ -174,8 +184,7 @@ def main():
     infer_model = InferenceModel(model).cpu()
     dummy = torch.randn(1, 32, 8)
     torch.onnx.export(infer_model, dummy, "model.onnx", export_params=True, opset_version=15,
-                      do_constant_folding=True, input_names=['input'], output_names=['output'],
-                      dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}})
+                      do_constant_folding=True, input_names=['input'], output_names=['output'])
     print("Exported model.onnx (with dynamic axes)")
 
     # Quantization Enhancement

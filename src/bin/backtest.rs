@@ -62,6 +62,7 @@ fn main() -> Result<()> {
     let mut entry_price = 0.0;
     let mut entry_tick = 0;
     let mut signal_dir = SignalDirection::Up;
+    let mut pending_execution_signal: Option<SignalDirection> = None;
 
     let stake = config.stake;
     let payout_ratio = config.payout_ratio;
@@ -79,6 +80,15 @@ fn main() -> Result<()> {
         let snapshot = processor.push(epoch, quote);
         total_ticks += 1;
 
+        if fsm.state() == TradingState::OrderPending {
+            if let Some(signal) = pending_execution_signal.take() {
+                entry_price = quote;
+                entry_tick = total_ticks;
+                signal_dir = signal;
+                fsm.transition(TradingState::InPosition)?;
+            }
+        }
+
         match fsm.state() {
             TradingState::Idle => {
                 let count =
@@ -87,11 +97,8 @@ fn main() -> Result<()> {
                 let decision = strategy.evaluate(&snapshot, history, TradingState::Idle);
 
                 if let Some(signal) = decision.signal {
-                    entry_price = quote;
-                    entry_tick = total_ticks;
-                    signal_dir = signal;
+                    pending_execution_signal = Some(signal);
                     fsm.transition(TradingState::OrderPending)?;
-                    fsm.transition(TradingState::InPosition)?;
                 }
             }
             TradingState::InPosition => {

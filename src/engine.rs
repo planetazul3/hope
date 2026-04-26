@@ -224,6 +224,8 @@ impl Engine {
                     if tick_started_at.duration_since(ready.received_at) > self.proposal_timeout {
                         warn!("discarding stale proposal");
                         safe_reset(&mut self.fsm);
+                        // Ensure any pending request ID associated with this lifecycle is cleared
+                        self.pending_req_id = None;
                         return Ok(());
                     }
 
@@ -317,6 +319,7 @@ impl Engine {
                     }
 
                     self.pending_req_id = Some(req_id);
+                    self.pending_probability = Some(decision.probability_up);
 
                     self.fsm.transition(TradingState::OrderPending)?;
                     self.order_sent_at = Some(tick_started_at);
@@ -423,6 +426,11 @@ impl Engine {
                     }
 
                     if update.is_sold.unwrap_or(0) == 1 {
+                        if Some(update.contract_id) != self.active_contract_id {
+                            warn!(contract_id = update.contract_id, "received close event for untracked or already closed contract; ignoring");
+                            return Ok(());
+                        }
+
                         let profit = update.profit.unwrap_or(0.0);
                         let old_balance = self.balance;
                         self.balance += profit;

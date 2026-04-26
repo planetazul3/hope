@@ -199,11 +199,16 @@ fn load_dotenv(path: &str) -> Result<HashMap<String, String>> {
             continue;
         }
 
-        let Some((key, value)) = line.split_once('=') else {
+        let Some((key, raw_value)) = line.split_once('=') else {
             continue;
         };
 
-        let cleaned = value.trim().trim_matches('"').trim_matches('\'');
+        // Strip inline comments (e.g. VAR=val # comment)
+        let value_without_comment = raw_value.split('#').next().unwrap_or(raw_value);
+        let cleaned = value_without_comment
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'');
         env_map.insert(key.trim().to_string(), cleaned.to_string());
     }
 
