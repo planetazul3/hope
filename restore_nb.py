@@ -319,7 +319,25 @@ export_src = [
     "if quantization_succeeded:\n",
     "    print(\"Deploy model_quantized.onnx\")\n",
     "else:\n",
-    "    print(\"WARNING: Quantization failed. Use model.onnx instead.\")\n"
+    "    print(\"WARNING: Quantization failed. Use model.onnx instead.\")\n",
+    "\n",
+    "# --- Cryptographic Signing Pipeline ---\n",
+    "try:\n",
+    "    from cryptography.hazmat.primitives import serialization\n",
+    "    from cryptography.hazmat.primitives.asymmetric import ed25519\n",
+    "    key_hex = os.environ.get('MODEL_SIGNING_KEY')\n",
+    "    if key_hex:\n",
+    "        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key_hex))\n",
+    "        for target in ['model.onnx', 'model_quantized.onnx']:\n",
+    "            if os.path.exists(target):\n",
+    "                with open(target, 'rb') as f: data = f.read()\n",
+    "                signature = private_key.sign(data)\n",
+    "                with open(target + '.sig', 'wb') as f: f.write(signature)\n",
+    "                print(f'Signed {target} -> {target}.sig')\n",
+    "    else:\n",
+    "        print('WARNING: MODEL_SIGNING_KEY not found. Models will not be signed.')\n",
+    "except ImportError:\n",
+    "    print('Signing skipped (cryptography library not installed)')\n"
 ]
 
 def make_cell(src, cell_type="code"):

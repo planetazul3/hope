@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::fs;
 use std::path::Path;
 use tracing::{error, info};
 use tract_onnx::prelude::*;
-use ed25519_dalek::{Verifier, VerifyingKey, Signature};
 
 use crate::strategy::ProbabilityModel;
 use crate::tick_processor::TickSnapshot;
@@ -22,7 +22,11 @@ pub struct TransformerModel {
 }
 
 impl TransformerModel {
-    pub fn load(path: impl AsRef<Path>, sequence_length: usize, public_key_hex: Option<&str>) -> Result<Self> {
+    pub fn load(
+        path: impl AsRef<Path>,
+        sequence_length: usize,
+        public_key_hex: Option<&str>,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let model_bytes = fs::read(path)
             .with_context(|| format!("failed to read model file: {}", path.display()))?;
@@ -30,21 +34,29 @@ impl TransformerModel {
         if let Some(pk_hex) = public_key_hex {
             info!(path = %path.display(), "verifying model signature");
             let sig_path = path.with_extension("onnx.sig");
-            let sig_bytes = fs::read(&sig_path)
-                .with_context(|| format!("failed to read signature file: {}", sig_path.display()))?;
+            let sig_bytes = fs::read(&sig_path).with_context(|| {
+                format!("failed to read signature file: {}", sig_path.display())
+            })?;
 
             let pk_bytes = hex::decode(pk_hex).context("invalid MODEL_PUBLIC_KEY hex format")?;
-            let public_key = VerifyingKey::from_bytes(&pk_bytes.try_into().map_err(|_| anyhow!("invalid public key length"))?)
-                .context("failed to parse Ed25519 public key")?;
+            let public_key = VerifyingKey::from_bytes(
+                &pk_bytes
+                    .try_into()
+                    .map_err(|_| anyhow!("invalid public key length"))?,
+            )
+            .context("failed to parse Ed25519 public key")?;
 
-            let signature = Signature::from_slice(&sig_bytes)
-                .context("invalid signature format")?;
+            let signature =
+                Signature::from_slice(&sig_bytes).context("invalid signature format")?;
 
-            public_key.verify(&model_bytes, &signature)
+            public_key
+                .verify(&model_bytes, &signature)
                 .map_err(|err| anyhow!("MODEL SIGNATURE VERIFICATION FAILED: {}", err))?;
             info!("model signature verified successfully");
         } else {
-            tracing::warn!("loading model WITHOUT signature verification (MODEL_PUBLIC_KEY not set)");
+            tracing::warn!(
+                "loading model WITHOUT signature verification (MODEL_PUBLIC_KEY not set)"
+            );
         }
 
         let model = tract_onnx::onnx()
@@ -84,30 +96,15 @@ impl TransformerModel {
                 .push((tick.ticks_since_reversal as f32).ln_1p());
             self.data_buffer.push(tick.volatility as f32);
 
-            // 6: Haar A1 approximation normalized by price
-            // 7: Haar D1 detail coefficient
-            // 8: Short-term to long-term volatility ratio
-            let global_idx = start_idx + i;
-
             // Phase 2: DWT Haar Wavelet Level-1 Decomposition
-            // A1 (Approximation) = (x_t + x_t-1) / sqrt(2)
-            // D1 (Detail) = (x_t - x_t-1) / sqrt(2)
-            if global_idx >= 1 {
-                // The first tick in the history cannot produce DWT coefficients and receives 0 padding for DWT
-                let x_t = history[global_idx].price;
-                let x_prev = history[global_idx - 1].price;
-
-                let a1 = (x_t + x_prev) / 2.0_f64.sqrt();
-                let d1 = (x_t - x_prev) / 2.0_f64.sqrt();
-
-                // Normalizing A1 by price level to keep it scale-invariant
-                let a1_norm = if x_t == 0.0 { 0.0 } else { (a1 / x_t) as f32 };
-                self.data_buffer.push(a1_norm);
-                self.data_buffer.push(d1 as f32);
+            // A1 (Approximation) normalized by price; D1 (Detail) coefficient.
+            let a1_norm = if tick.price == 0.0 {
+                0.0
             } else {
-                self.data_buffer.push(0.0);
-                self.data_buffer.push(0.0);
-            }
+                (tick.dwt_a1 / tick.price) as f32
+            };
+            self.data_buffer.push(a1_norm);
+            self.data_buffer.push(tick.dwt_d1 as f32);
             self.data_buffer.push(tick.vol_ratio as f32);
         }
 

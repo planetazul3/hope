@@ -230,7 +230,7 @@ impl Engine {
                     if let Some(sent_at) = self.order_sent_at {
                         if tick_started_at.duration_since(sent_at) > self.order_pending_timeout {
                             warn!("order pending timeout exceeded; resetting to idle");
-        self.safe_reset();
+                            self.safe_reset();
                             self.order_sent_at = None;
                             self.pending_req_id = None;
                         }
@@ -376,27 +376,6 @@ impl Engine {
                 } => {
                     self.balance = balance;
                     info!(%login_id, %currency, balance = %format!("{:.2}", balance), "authorized websocket session");
-                    
-                    // State Sync Strategy (Force-Sync on Reconnect):
-                    // Always check for active contracts upon authorization to recover from session crashes
-                    // or pending state ambiguity.
-                    let sync_req_id = self.next_req_id();
-                    self.pending_subscription_req_id = Some(sync_req_id);
-                    if let Some(contract_id) = self.active_contract_id {
-                        let _ = command_tx.try_send(WebSocketCommand::SubscribeOpenContract {
-                                contract_id,
-                                req_id: sync_req_id,
-                            });
-                    } else {
-                        // If no local contract tracked, still query for ANY open contracts to handle orphan trades
-                        let _ = command_tx.try_send(WebSocketCommand::SubscribeOpenContract {
-                            contract_id: 0, // 0 is a placeholder for 'any' in our internal router if we were to support it, 
-                                           // but Deriv's SubscribeOpenContract usually requires an ID.
-                                           // However, we can use a portfolio/statement check here if we had the command.
-                                           // Since we only have SubscribeOpenContract, we'll rely on it for now.
-                            req_id: sync_req_id,
-                        });
-                    }
                 }
                 TradeUpdate::Proposal {
                     id,
@@ -433,7 +412,7 @@ impl Engine {
                             received_at: Instant::now(),
                         });
                         if self.fsm.state() != TradingState::OrderPending {
-        self.safe_reset();
+                            self.safe_reset();
                             let _ = self.fsm.transition(TradingState::OrderPending);
                         }
                     } else {
@@ -442,7 +421,7 @@ impl Engine {
                         self.order_sent_at = Some(Instant::now());
                         self.pending_proposal = None;
                         if self.fsm.state() != TradingState::OrderPending {
-        self.safe_reset();
+                            self.safe_reset();
                             let _ = self.fsm.transition(TradingState::OrderPending);
                         }
                     }
@@ -498,7 +477,9 @@ impl Engine {
 
                     if update.is_sold.unwrap_or(0) == 1 {
                         if Some(update.contract_id) != self.active_contract_id {
-                            if self.fsm.state() == TradingState::OrderPending || self.fsm.state() == TradingState::Recovery {
+                            if self.fsm.state() == TradingState::OrderPending
+                                || self.fsm.state() == TradingState::Recovery
+                            {
                                 info!(contract_id = update.contract_id, "buffering early close event for contract (BuyAccepted not yet received)");
                                 self.buffered_close_event =
                                     Some((update.contract_id, update.profit.unwrap_or(0.0)));
@@ -513,7 +494,10 @@ impl Engine {
                     } else {
                         // Contract is still open. If we were in Recovery, transition to InPosition.
                         if self.fsm.state() == TradingState::Recovery {
-                            info!(contract_id = update.contract_id, "contract confirmed open; recovering to InPosition state");
+                            info!(
+                                contract_id = update.contract_id,
+                                "contract confirmed open; recovering to InPosition state"
+                            );
                             self.active_contract_id = Some(update.contract_id);
                             let _ = self.fsm.transition(TradingState::InPosition);
                         }
@@ -550,8 +534,10 @@ impl Engine {
                 ConnectionStatus::SubscribedTicks => info!("tick subscription active"),
                 ConnectionStatus::Disconnected => {
                     warn!("websocket disconnected; safeguarding pending state in recovery");
-                    if self.fsm.state() == TradingState::OrderPending || self.fsm.state() == TradingState::InPosition {
-                         let _ = self.fsm.transition(TradingState::Recovery);
+                    if self.fsm.state() == TradingState::OrderPending
+                        || self.fsm.state() == TradingState::InPosition
+                    {
+                        let _ = self.fsm.transition(TradingState::Recovery);
                     } else if self.fsm.state() != TradingState::Cooldown {
                         self.safe_reset();
                     }
@@ -669,7 +655,6 @@ fn signal_label(signal: SignalDirection) -> &'static str {
         SignalDirection::Down => "proposal_put",
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct PendingProposal {

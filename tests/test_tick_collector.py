@@ -11,36 +11,18 @@ import tick_collector
 
 class TestTickCollectorBatchInsert(unittest.TestCase):
     def setUp(self):
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.execute("""
-            CREATE TABLE ticks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                epoch REAL NOT NULL,
-                quote REAL NOT NULL,
-                UNIQUE(epoch, quote)
-            )
-        """)
+        self.store = tick_collector.TickStore(":memory:")
 
     def tearDown(self):
-        self.conn.close()
+        self.store.close()
 
     def test_insert_batch_counts_only_new_rows(self):
-        first = tick_collector.insert_batch(
-            self.conn,
-            [1, 2, 3],
-            [10.0, 20.0, 30.0],
-        )
-        second = tick_collector.insert_batch(
-            self.conn,
-            [2, 3, 4],
-            [20.0, 30.0, 40.0],
-        )
+        first = self.store.insert_batch("R_100", [1, 2, 3], [10.0, 20.0, 30.0])
+        second = self.store.insert_batch("R_100", [2, 3, 4], [20.0, 30.0, 40.0])
 
         self.assertEqual(first, 3)
         self.assertEqual(second, 1)
-
-        total_rows = self.conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
-        self.assertEqual(total_rows, 4)
+        self.assertEqual(self.store.get_count("R_100"), 4)
 
 
 if __name__ == "__main__":

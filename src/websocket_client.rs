@@ -304,7 +304,8 @@ impl DerivWebSocketClient {
         )?;
 
         // Resubscribe to tracked contracts from the shared state
-        let contracts_to_resubscribe: Vec<u64> = self.tracked_contracts.read().iter().copied().collect();
+        let contracts_to_resubscribe: Vec<u64> =
+            self.tracked_contracts.read().iter().copied().collect();
         for contract_id in contracts_to_resubscribe {
             self.send_json(
                 &mut write,

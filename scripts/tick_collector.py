@@ -444,13 +444,13 @@ class CollectionService:
             if len(times) == BATCH_SIZE:
                 # If the batch is full, we move the pointer to the newest tick received.
                 # To avoid an infinite loop if many ticks have the same timestamp,
-                # we advance by a tiny increment if the timestamp hasn't moved.
-                next_start = newest
-                if next_start <= start_ts:
-                    next_start = start_ts + 0.001
+                # we advance by at least 1 second since the API expects integer epochs.
+                next_start = int(newest)
+                if next_start <= int(start_ts):
+                    next_start = int(start_ts) + 1
                 start_ts = next_start
             else:
-                start_ts = end_ts
+                start_ts = int(end_ts)
 
             if target_count and self.stats.inserted >= target_count:
                 logger.info(f"Target count {target_count:,} reached.")
