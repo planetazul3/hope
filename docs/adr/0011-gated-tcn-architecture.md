@@ -1,6 +1,6 @@
 # 0011: Gated TCN with Squeeze-and-Excitation
 
-*   **Status**: Accepted
+*   **Status**: Superseded by 0017
 *   **Date**: 2026-04-24
 
 ## Context
