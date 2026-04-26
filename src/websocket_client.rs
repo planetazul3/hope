@@ -521,7 +521,7 @@ impl DerivWebSocketClient {
         let payload =
             serde_json::to_string(message).context("failed to serialize websocket message")?;
         write
-            .send(Message::Text(payload))
+            .send(Message::Text(payload.into()))
             .await
             .context("failed to send websocket message")
     }
