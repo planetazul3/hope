@@ -35,6 +35,7 @@ fn main() -> Result<()> {
     let model = match config.model_type {
         hope::config::ModelType::Gaussian => AnyModel::Gaussian(GaussianModel {
             duration_ticks: config.duration_ticks,
+            snr_threshold: config.snr_threshold,
         }),
         hope::config::ModelType::Transformer => {
             let model_path = config

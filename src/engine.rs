@@ -107,6 +107,7 @@ impl Engine {
                             error!(error = %err, path = %path, "failed to load transformer model; falling back to Gaussian");
                             AnyModel::Gaussian(GaussianModel {
                                 duration_ticks: config.duration_ticks,
+                                snr_threshold: config.snr_threshold,
                             })
                         }
                     }
@@ -114,11 +115,13 @@ impl Engine {
                     warn!("transformer model path not configured; falling back to Gaussian");
                     AnyModel::Gaussian(GaussianModel {
                         duration_ticks: config.duration_ticks,
+                        snr_threshold: config.snr_threshold,
                     })
                 }
             }
             crate::config::ModelType::Gaussian => AnyModel::Gaussian(GaussianModel {
                 duration_ticks: config.duration_ticks,
+                snr_threshold: config.snr_threshold,
             }),
         };
 
@@ -140,8 +143,8 @@ impl Engine {
             active_contract_id: None,
             contract_started_at: None,
             order_sent_at: None,
-            proposal_timeout: Duration::from_secs(60),
-            order_pending_timeout: Duration::from_secs(10),
+            proposal_timeout: Duration::from_secs(config.proposal_timeout_secs),
+            order_pending_timeout: Duration::from_secs(config.order_pending_timeout_secs),
             tick_logger,
             pending_req_id: None,
             pending_subscription_req_id: None,
@@ -708,6 +711,9 @@ mod tests {
             max_consecutive_losses: 3,
             tick_audit_log_path: "/dev/null".to_string(),
             payout_ratio: 0.95,
+            order_pending_timeout_secs: 10,
+            proposal_timeout_secs: 60,
+            snr_threshold: 0.05,
         }
     }
 

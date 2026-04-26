@@ -247,8 +247,8 @@ class ProjectConsolidator:
                 for file in sorted(files):
                     fpath = Path(root) / file
                     
-                    # Skip the script itself and the output file
-                    if fpath.name == Path(__file__).name or fpath.name == output_path.name:
+                    # Skip the output file
+                    if fpath.name == output_path.name:
                         continue
                     
                     self.stats["total_scanned"] += 1

@@ -16,6 +16,7 @@ const VOLATILITY_EPSILON: f64 = 1e-8;
 #[derive(Debug, Clone, Copy)]
 pub struct GaussianModel {
     pub duration_ticks: u32,
+    pub snr_threshold: f64,
 }
 
 impl ProbabilityModel for GaussianModel {
@@ -24,9 +25,8 @@ impl ProbabilityModel for GaussianModel {
             return 0.5;
         }
 
-        // SNR Guard: prevent signals when drift is not statistically meaningful
         let snr = tick.drift / tick.volatility;
-        if snr.abs() < 0.05 {
+        if snr.abs() < self.snr_threshold {
             return 0.5;
         }
 
@@ -150,9 +150,7 @@ where
         }
 
         // Clamp to ensure it doesn't fall below floor (never below 0.5)
-        adjusted_threshold = adjusted_threshold
-            .max(0.5_f64)
-            .max(self.threshold - self.momentum_reward);
+        adjusted_threshold = adjusted_threshold.max(0.5_f64);
 
         // General trend is positive if probability_up > 0.5 (driven by positive drift)
         // General trend is negative if probability_down > 0.5 (driven by negative drift)
@@ -178,11 +176,11 @@ mod tests {
     use crate::tick_processor::{Direction, TickSnapshot};
 
     #[derive(Debug, Clone, Copy)]
-    struct ConstantModel;
+    struct VariableModel(f64);
 
-    impl ProbabilityModel for ConstantModel {
+    impl ProbabilityModel for VariableModel {
         fn probability_up(&mut self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
-            0.6
+            self.0
         }
     }
 
@@ -200,7 +198,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
+        let mut strategy = StrategyEngine::new(0.55, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.6);
@@ -221,7 +219,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut strategy = StrategyEngine::new(0.55, ConstantModel, 5, 0.05, 0.02, 0.1);
+        let mut strategy = StrategyEngine::new(0.55, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.5);
@@ -242,10 +240,10 @@ mod tests {
             ..Default::default()
         };
 
-        // Case 1: ConstantModel returns 0.6.
+        // Case 1: VariableModel(0.6) returns 0.6.
         // Base threshold 0.58. Adjusted is 0.63.
         // 0.6 >= 0.58 but 0.6 < 0.63. Should be None.
-        let mut strategy = StrategyEngine::new(0.58, ConstantModel, 5, 0.05, 0.02, 0.1);
+        let mut strategy = StrategyEngine::new(0.58, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
         assert_eq!(decision.signal, None);
 
@@ -255,5 +253,30 @@ mod tests {
         snapshot_high_vol.volatility = 0.5;
         let decision_high_vol = strategy.evaluate(&snapshot_high_vol, &[], TradingState::Idle);
         assert_eq!(decision_high_vol.signal, Some(SignalDirection::Up));
+    }
+
+    #[test]
+    fn test_threshold_floor_clamping() {
+        let snapshot = TickSnapshot {
+            epoch: 2,
+            price: 101.0,
+            direction: Direction::Up,
+            streak: 4,           // Triggers momentum reward
+            volatility: 0.00005, // Triggers volatility penalty
+            drift: 0.1,
+            ticks_since_reversal: 5,
+            return_magnitude: 0.1,
+            ..Default::default()
+        };
+
+        // Case: Base 0.51, Reward 0.05, Penalty 0.02.
+        // Adjusted: 0.51 - 0.05 + 0.02 = 0.48.
+        // Floor should clamp to 0.5.
+        let mut strategy = StrategyEngine::new(0.51, VariableModel(0.49), 5, 0.02, 0.05, 0.1);
+        let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
+
+        // Model returns 0.49. Since adjusted_threshold is 0.5, 0.49 < 0.5 -> No signal.
+        // If it didn't clamp, 0.49 >= 0.48 -> Signal.
+        assert_eq!(decision.signal, None);
     }
 }

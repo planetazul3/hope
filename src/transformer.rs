@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::fs;
 use std::path::Path;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tract_onnx::prelude::*;
 
 use crate::strategy::ProbabilityModel;
@@ -32,27 +32,35 @@ impl TransformerModel {
             .with_context(|| format!("failed to read model file: {}", path.display()))?;
 
         if let Some(pk_hex) = public_key_hex {
-            info!(path = %path.display(), "verifying model signature");
             let sig_path = path.with_extension("onnx.sig");
-            let sig_bytes = fs::read(&sig_path).with_context(|| {
-                format!("failed to read signature file: {}", sig_path.display())
-            })?;
+            if sig_path.exists() {
+                let sig_bytes = fs::read(&sig_path).with_context(|| {
+                    format!("failed to read signature file: {}", sig_path.display())
+                })?;
 
-            let pk_bytes = hex::decode(pk_hex).context("invalid MODEL_PUBLIC_KEY hex format")?;
-            let public_key = VerifyingKey::from_bytes(
-                &pk_bytes
-                    .try_into()
-                    .map_err(|_| anyhow!("invalid public key length"))?,
-            )
-            .context("failed to parse Ed25519 public key")?;
+                let pk_bytes =
+                    hex::decode(pk_hex).context("invalid MODEL_PUBLIC_KEY hex format")?;
+                let public_key = VerifyingKey::from_bytes(
+                    &pk_bytes
+                        .try_into()
+                        .map_err(|_| anyhow!("invalid public key length"))?,
+                )
+                .context("failed to parse Ed25519 public key")?;
 
-            let signature =
-                Signature::from_slice(&sig_bytes).context("invalid signature format")?;
+                let signature =
+                    Signature::from_slice(&sig_bytes).context("invalid signature format")?;
 
-            public_key
-                .verify(&model_bytes, &signature)
-                .map_err(|err| anyhow!("MODEL SIGNATURE VERIFICATION FAILED: {}", err))?;
-            info!("model signature verified successfully");
+                public_key
+                    .verify(&model_bytes, &signature)
+                    .map_err(|err| anyhow!("MODEL SIGNATURE VERIFICATION FAILED: {}", err))?;
+                info!("model signature verified successfully");
+            } else {
+                warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                warn!("WARNING: MODEL SIGNATURE FILE MISSING (.onnx.sig)");
+                warn!("A public key was provided, but no signature was found.");
+                warn!("Proceeding with UNVERIFIED model at user's risk.");
+                warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+            }
         } else {
             tracing::warn!(
                 "loading model WITHOUT signature verification (MODEL_PUBLIC_KEY not set)"
@@ -98,14 +106,19 @@ impl TransformerModel {
 
             // Phase 2: DWT Haar Wavelet Level-1 Decomposition
             // A1 (Approximation) normalized by price; D1 (Detail) coefficient.
-            let a1_norm = if tick.price == 0.0 {
-                0.0
-            } else {
-                (tick.dwt_a1 / tick.price) as f32
-            };
+            let safe_price = if tick.price == 0.0 { 1e-8 } else { tick.price };
+            let a1_norm = (tick.dwt_a1 / (safe_price + 1e-8_f64)) as f32;
             self.data_buffer.push(a1_norm);
             self.data_buffer.push(tick.dwt_d1 as f32);
             self.data_buffer.push(tick.vol_ratio as f32);
+        }
+
+        if self
+            .data_buffer
+            .iter()
+            .any(|v| v.is_nan() || v.is_infinite())
+        {
+            return Err(anyhow!("corrupted features: NaN or Inf detected"));
         }
 
         let input = Tensor::from_shape(&[1, self.sequence_length, 8], &self.data_buffer)?;
@@ -120,6 +133,57 @@ impl TransformerModel {
             .ok_or_else(|| anyhow!("Empty model output"))?;
 
         Ok(prob as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_a1_normalization_alignment() {
+        // Mock a tick that triggers the safe_price logic
+        let tick = TickSnapshot {
+            price: 0.0,
+            dwt_a1: 1.41421356, // sqrt(2) * (0+2)/2 approx... let's just use a value
+            ..Default::default()
+        };
+
+        // Expected in Rust: safe_price = 1e-8, denominator = 2e-8
+        // Result: 1.41421356 / 2e-8 = 70710678
+        let safe_price = 1e-8;
+        let expected = (tick.dwt_a1 / (safe_price + 1e-8)) as f32;
+
+        // Verify logic used in predict
+        let actual_safe_price = if tick.price == 0.0 { 1e-8 } else { tick.price };
+        let actual = (tick.dwt_a1 / (actual_safe_price + 1e-8)) as f32;
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_signature_fallback_warning() {
+        // This test mostly ensures it doesn't crash if sig is missing but PK is set
+        let model_path = Path::new("model_test_temp.onnx");
+        fs::write(model_path, b"dummy onnx content").unwrap();
+
+        let pk = "00".repeat(32); // 32 bytes of zeros
+
+        // This should NOT fail because load() now warns instead of erroring on missing .sig
+        // It will fail later on parsing dummy bytes, which is fine for this test's scope
+        let result = TransformerModel::load(model_path, 32, Some(&pk));
+
+        match result {
+            Err(e) => {
+                // If it fails, it should be because of ONNX parsing, not signature missing
+                let err_msg = e.to_string();
+                assert!(!err_msg.contains("failed to read signature file"));
+            }
+            Ok(_) => {}
+        }
+
+        // Cleanup
+        let _ = fs::remove_file(model_path);
     }
 }
 

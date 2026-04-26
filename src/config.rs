@@ -52,6 +52,9 @@ pub struct AppConfig {
     pub tick_audit_log_path: String,
     /// Payout ratio for wins (e.g., 0.95 for 95%).
     pub payout_ratio: f64,
+    pub order_pending_timeout_secs: u64,
+    pub proposal_timeout_secs: u64,
+    pub snr_threshold: f64,
 }
 
 impl AppConfig {
@@ -155,6 +158,19 @@ impl AppConfig {
                 .map(|v| v.into_owned())
                 .unwrap_or_else(|_| "tick_audit.log".to_string()),
             payout_ratio: parse_or_default(&env_map, "DERIV_PAYOUT_RATIO", 0.95)?,
+            order_pending_timeout_secs: parse_or_default(
+                &env_map,
+                "DERIV_ORDER_PENDING_TIMEOUT_SECS",
+                10_u64,
+            )?
+            .max(1), // Ensure at least 1 second
+            proposal_timeout_secs: parse_or_default(
+                &env_map,
+                "DERIV_PROPOSAL_TIMEOUT_SECS",
+                60_u64,
+            )?
+            .max(1),
+            snr_threshold: parse_or_default(&env_map, "DERIV_SNR_THRESHOLD", 0.05)?,
         })
     }
 }
