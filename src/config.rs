@@ -2,6 +2,8 @@ use std::{borrow::Cow, collections::HashMap, fs, path::Path, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 
+use secrecy::SecretString;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerivEnvironment {
     Demo,
@@ -19,7 +21,7 @@ pub struct AppConfig {
     pub websocket_endpoint: String,
     pub app_id: u32,
     pub deriv_environment: DerivEnvironment,
-    pub token: String,
+    pub token: SecretString,
     pub symbol: String,
     pub contract_type: String,
     pub currency: String,
@@ -35,6 +37,7 @@ pub struct AppConfig {
     pub trading_enabled: bool,
     pub model_type: ModelType,
     pub transformer_model_path: Option<String>,
+    pub model_public_key: Option<String>,
     pub transformer_sequence_length: usize,
     /// Minimum number of ticks a trend must persist (momentum guard).
     pub min_trend_length: u32,
@@ -65,7 +68,7 @@ impl AppConfig {
             other => return Err(anyhow!("unsupported DERIV_ENVIRONMENT value: {other}")),
         };
 
-        let token = match deriv_environment {
+        let token_str = match deriv_environment {
             DerivEnvironment::Demo => lookup_env(&env_map, "DERIV_DEMO_TOKEN")?.into_owned(),
             DerivEnvironment::Real => lookup_env(&env_map, "DERIV_REAL_TOKEN")?.into_owned(),
         };
@@ -76,7 +79,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "wss://ws.derivws.com/websockets/v3".to_string()),
             app_id: parse_or_default(&env_map, "DERIV_APP_ID", 1089)?,
             deriv_environment,
-            token,
+            token: SecretString::new(token_str),
             symbol: lookup_env(&env_map, "DERIV_SYMBOL")
                 .map(|v| v.into_owned())
                 .unwrap_or_else(|_| "R_100".to_string()),
@@ -125,6 +128,9 @@ impl AppConfig {
                 _ => ModelType::Gaussian,
             },
             transformer_model_path: lookup_env(&env_map, "TRANSFORMER_MODEL_PATH")
+                .map(|v| v.into_owned())
+                .ok(),
+            model_public_key: lookup_env(&env_map, "MODEL_PUBLIC_KEY")
                 .map(|v| v.into_owned())
                 .ok(),
             transformer_sequence_length: parse_or_default(
@@ -227,12 +233,13 @@ mod tests {
     #[test]
     #[serial]
     fn parses_environment_case_insensitively() {
+        use secrecy::ExposeSecret;
         std::env::set_var("DERIV_ENVIRONMENT", "real");
         std::env::set_var("DERIV_REAL_TOKEN", "token");
 
         let config = AppConfig::load().expect("config should load");
 
         assert_eq!(config.deriv_environment, DerivEnvironment::Real);
-        assert_eq!(config.token, "token");
+        assert_eq!(config.token.expose_secret(), "token");
     }
 }

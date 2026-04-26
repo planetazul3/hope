@@ -1,7 +1,9 @@
 use anyhow::{anyhow, Context, Result};
+use std::fs;
 use std::path::Path;
-use tracing::error;
+use tracing::{error, info};
 use tract_onnx::prelude::*;
+use ed25519_dalek::{Verifier, VerifyingKey, Signature};
 
 use crate::strategy::ProbabilityModel;
 use crate::tick_processor::TickSnapshot;
@@ -20,10 +22,34 @@ pub struct TransformerModel {
 }
 
 impl TransformerModel {
-    pub fn load(path: impl AsRef<Path>, sequence_length: usize) -> Result<Self> {
+    pub fn load(path: impl AsRef<Path>, sequence_length: usize, public_key_hex: Option<&str>) -> Result<Self> {
+        let path = path.as_ref();
+        let model_bytes = fs::read(path)
+            .with_context(|| format!("failed to read model file: {}", path.display()))?;
+
+        if let Some(pk_hex) = public_key_hex {
+            info!(path = %path.display(), "verifying model signature");
+            let sig_path = path.with_extension("onnx.sig");
+            let sig_bytes = fs::read(&sig_path)
+                .with_context(|| format!("failed to read signature file: {}", sig_path.display()))?;
+
+            let pk_bytes = hex::decode(pk_hex).context("invalid MODEL_PUBLIC_KEY hex format")?;
+            let public_key = VerifyingKey::from_bytes(&pk_bytes.try_into().map_err(|_| anyhow!("invalid public key length"))?)
+                .context("failed to parse Ed25519 public key")?;
+
+            let signature = Signature::from_slice(&sig_bytes)
+                .context("invalid signature format")?;
+
+            public_key.verify(&model_bytes, &signature)
+                .map_err(|err| anyhow!("MODEL SIGNATURE VERIFICATION FAILED: {}", err))?;
+            info!("model signature verified successfully");
+        } else {
+            tracing::warn!("loading model WITHOUT signature verification (MODEL_PUBLIC_KEY not set)");
+        }
+
         let model = tract_onnx::onnx()
-            .model_for_path(path.as_ref())
-            .with_context(|| format!("failed to read ONNX model from {}", path.as_ref().display()))?
+            .model_for_read(&mut &model_bytes[..])
+            .with_context(|| format!("failed to parse ONNX model from {}", path.display()))?
             .with_input_fact(0, f32::fact([1, sequence_length, 8]).into())
             .context("failed to set model input facts")?
             .into_optimized()

@@ -21,15 +21,38 @@ def load_data_from_csv(csv_path):
     df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'])
     return df['quote'].values.astype(np.float32)
 
+import requests
+
+def is_cloud_env():
+    # Google Colab Metadata check
+    try:
+        resp = requests.get("http://metadata.google.internal/computeMetadata/v1/instance/", 
+                            headers={"Metadata-Flavor": "Google"}, timeout=2)
+        if resp.status_code == 200:
+            return "colab"
+    except Exception:
+        pass
+
+    # Kaggle Mount check
+    if os.path.exists('/kaggle/input') and os.path.ismount('/kaggle/input'):
+        return "kaggle"
+    
+    # Fallback for manual override if strictly necessary (not recommended)
+    if os.environ.get('FORCE_CLOUD_ENV') == '1':
+        return "manual"
+        
+    return None
+
 def main():
-    if 'COLAB_GPU' not in os.environ and 'KAGGLE_URL_BASE' not in os.environ:
+    cloud = is_cloud_env()
+    if not cloud:
         print(
             "ERROR: Model training is prohibited on local machines. "
-            "Upload data/ticks.csv to Google Colab or Kaggle and execute "
-            "notebooks/train_transformer.ipynb in a cloud GPU environment. "
-            "Scripts contain runtime guards that abort execution outside cloud environments."
+            "This script must be run in Google Colab or Kaggle. "
+            "Hardware/Infrastructure verification failed."
         )
         sys.exit(1)
+    print(f"Cloud environment verified: {cloud}")
 
     csv_path = "data/ticks.csv"
     seq_len = 32

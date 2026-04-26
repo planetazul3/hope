@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 pub enum TradingState {
     Idle,
     OrderPending,
+    Recovery,
     InPosition,
     Cooldown,
 }
@@ -40,11 +41,16 @@ impl TradingFsm {
             (TradingState::Idle, TradingState::OrderPending)
                 | (TradingState::Idle, TradingState::InPosition)
                 | (TradingState::Idle, TradingState::Cooldown)
+                | (TradingState::Idle, TradingState::Recovery)
                 | (TradingState::OrderPending, TradingState::InPosition)
                 | (TradingState::OrderPending, TradingState::Idle)
                 | (TradingState::OrderPending, TradingState::Cooldown)
+                | (TradingState::OrderPending, TradingState::Recovery)
+                | (TradingState::Recovery, TradingState::Idle)
+                | (TradingState::Recovery, TradingState::InPosition)
                 | (TradingState::InPosition, TradingState::Idle)
                 | (TradingState::InPosition, TradingState::Cooldown)
+                | (TradingState::InPosition, TradingState::Recovery)
                 | (TradingState::Cooldown, TradingState::Idle)
         );
 

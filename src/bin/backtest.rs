@@ -42,8 +42,12 @@ fn main() -> Result<()> {
                 .as_deref()
                 .unwrap_or("model.onnx");
             AnyModel::Transformer(Box::new(
-                TransformerModel::load(model_path, config.transformer_sequence_length)
-                    .expect("failed to load transformer model"),
+                TransformerModel::load(
+                    model_path,
+                    config.transformer_sequence_length,
+                    config.model_public_key.as_deref(),
+                )
+                .expect("failed to load transformer model"),
             ))
         }
     };
@@ -142,6 +146,11 @@ fn main() -> Result<()> {
             TradingState::OrderPending => {
                 // Should not happen in backtest as we jump directly to InPosition
                 fsm.transition(TradingState::InPosition)?;
+            }
+            TradingState::Recovery => {
+                // Recovery is not expected in backtest as there is no network,
+                // but we handle it by jumping back to Idle.
+                fsm.transition(TradingState::Idle)?;
             }
         }
     }

@@ -10,6 +10,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 use url::Url;
 
+use secrecy::ExposeSecret;
+
 use crate::{config::AppConfig, execution::ProposalSpec};
 
 // Audit summary (RESOLVED):
@@ -295,7 +297,7 @@ impl DerivWebSocketClient {
         self.send_json(
             &mut write,
             &AuthorizeRequest {
-                authorize: &self.cfg.token,
+                authorize: self.cfg.token.expose_secret(),
                 req_id: Some(self.next_req_id()),
             },
         )

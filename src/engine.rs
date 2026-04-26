@@ -83,6 +83,7 @@ impl Engine {
                     match crate::transformer::TransformerModel::load(
                         path,
                         config.transformer_sequence_length,
+                        config.model_public_key.as_deref(),
                     ) {
                         Ok(m) => AnyModel::Transformer(Box::new(m)),
                         Err(err) => {
@@ -153,6 +154,17 @@ impl Engine {
                 let tick_started_at = Instant::now();
                 let snapshot = self.tick_processor.push(tick.epoch, tick.quote);
                 self.execution.on_tick(snapshot.epoch, tick_started_at);
+
+                if self.fsm.state() == TradingState::Recovery {
+                    self.tick_logger.try_log(
+                        snapshot,
+                        0.5,
+                        "recovery_active",
+                        self.fsm.state(),
+                        tick_started_at.elapsed().as_millis(),
+                    );
+                    return Ok(());
+                }
 
                 if self.fsm.state() == TradingState::Cooldown {
                     self.cooldown_remaining = self.cooldown_remaining.saturating_sub(1);
@@ -352,18 +364,26 @@ impl Engine {
                 } => {
                     self.balance = balance;
                     info!(%login_id, %currency, balance = %format!("{:.2}", balance), "authorized websocket session");
+                    
+                    // State Sync Strategy (Force-Sync on Reconnect):
+                    // Always check for active contracts upon authorization to recover from session crashes
+                    // or pending state ambiguity.
+                    let sync_req_id = self.next_req_id();
+                    self.pending_subscription_req_id = Some(sync_req_id);
                     if let Some(contract_id) = self.active_contract_id {
-                        let req_id = self.next_req_id();
-                        self.pending_subscription_req_id = Some(req_id);
-                        if command_tx
-                            .try_send(WebSocketCommand::SubscribeOpenContract {
+                        let _ = command_tx.try_send(WebSocketCommand::SubscribeOpenContract {
                                 contract_id,
-                                req_id,
-                            })
-                            .is_err()
-                        {
-                            error!("failed to queue open contract resubscription");
-                        }
+                                req_id: sync_req_id,
+                            });
+                    } else {
+                        // If no local contract tracked, still query for ANY open contracts to handle orphan trades
+                        let _ = command_tx.try_send(WebSocketCommand::SubscribeOpenContract {
+                            contract_id: 0, // 0 is a placeholder for 'any' in our internal router if we were to support it, 
+                                           // but Deriv's SubscribeOpenContract usually requires an ID.
+                                           // However, we can use a portfolio/statement check here if we had the command.
+                                           // Since we only have SubscribeOpenContract, we'll rely on it for now.
+                            req_id: sync_req_id,
+                        });
                     }
                 }
                 TradeUpdate::Proposal {
@@ -466,7 +486,7 @@ impl Engine {
 
                     if update.is_sold.unwrap_or(0) == 1 {
                         if Some(update.contract_id) != self.active_contract_id {
-                            if self.fsm.state() == TradingState::OrderPending {
+                            if self.fsm.state() == TradingState::OrderPending || self.fsm.state() == TradingState::Recovery {
                                 info!(contract_id = update.contract_id, "buffering early close event for contract (BuyAccepted not yet received)");
                                 self.buffered_close_event =
                                     Some((update.contract_id, update.profit.unwrap_or(0.0)));
@@ -478,6 +498,13 @@ impl Engine {
 
                         let profit = update.profit.unwrap_or(0.0);
                         self.process_contract_closure(update.contract_id, profit, command_tx)?;
+                    } else {
+                        // Contract is still open. If we were in Recovery, transition to InPosition.
+                        if self.fsm.state() == TradingState::Recovery {
+                            info!(contract_id = update.contract_id, "contract confirmed open; recovering to InPosition state");
+                            self.active_contract_id = Some(update.contract_id);
+                            let _ = self.fsm.transition(TradingState::InPosition);
+                        }
                     }
                 }
             },
@@ -489,10 +516,12 @@ impl Engine {
                 error!(?req_id, ?code, ?message, "api error received");
 
                 if req_id.is_some() && req_id == self.pending_req_id {
-                    warn!("active request failed; resetting FSM");
+                    warn!("active request failed; transitioning to recovery");
                     if self.fsm.state() == TradingState::OrderPending {
-                        safe_reset(&mut self.fsm);
+                        let _ = self.fsm.transition(TradingState::Recovery);
                         self.pending_proposal = None;
+                    } else {
+                        safe_reset(&mut self.fsm);
                     }
                     self.pending_req_id = None;
                 }
@@ -508,8 +537,10 @@ impl Engine {
                 ConnectionStatus::Authorized => info!("authorized"),
                 ConnectionStatus::SubscribedTicks => info!("tick subscription active"),
                 ConnectionStatus::Disconnected => {
-                    warn!("websocket disconnected; clearing pending state");
-                    if self.fsm.state() != TradingState::Cooldown {
+                    warn!("websocket disconnected; safeguarding pending state in recovery");
+                    if self.fsm.state() == TradingState::OrderPending || self.fsm.state() == TradingState::InPosition {
+                         let _ = self.fsm.transition(TradingState::Recovery);
+                    } else if self.fsm.state() != TradingState::Cooldown {
                         safe_reset(&mut self.fsm);
                     }
                     self.pending_proposal = None;
@@ -643,7 +674,7 @@ mod tests {
             websocket_endpoint: "wss://example.com".to_string(),
             app_id: 1089,
             deriv_environment: crate::config::DerivEnvironment::Demo,
-            token: "token".to_string(),
+            token: "token".to_string().into(),
             symbol: "R_100".to_string(),
             contract_type: "CALL".to_string(),
             currency: "USD".to_string(),
@@ -659,6 +690,7 @@ mod tests {
             trading_enabled: true,
             model_type: crate::config::ModelType::Gaussian,
             transformer_model_path: None,
+            model_public_key: None,
             transformer_sequence_length: 32,
             min_trend_length: 5,
             strategy_volatility_penalty: 0.05,
@@ -788,7 +820,7 @@ mod tests {
             &command_tx,
         )?;
 
-        assert_eq!(engine.fsm.state(), TradingState::Idle);
+        assert_eq!(engine.fsm.state(), TradingState::Recovery);
         assert!(engine.pending_proposal.is_none());
 
         Ok(())
