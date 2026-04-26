@@ -20,11 +20,14 @@ use crate::{config::AppConfig, execution::ProposalSpec};
 // - Replaced blocking sends with non-blocking `try_send` in the hot read loop.
 // - Added atomic drop counters and detailed error events for improved observability.
 
+use parking_lot::RwLock;
+
 #[derive(Debug)]
 pub struct DerivWebSocketClient {
     cfg: AppConfig,
     req_id_counter: Arc<AtomicU32>,
     dropped_events: Arc<AtomicU64>,
+    tracked_contracts: Arc<RwLock<BTreeSet<u64>>>,
 }
 
 #[derive(Debug)]
@@ -100,9 +103,6 @@ pub enum WebSocketCommand {
     SubscribeOpenContract {
         contract_id: u64,
         req_id: u32,
-    },
-    ClearTrackedContract {
-        contract_id: u64,
     },
 }
 
@@ -196,11 +196,16 @@ struct AuthorizePayload {
 }
 
 impl DerivWebSocketClient {
-    pub fn new(cfg: AppConfig, req_id_counter: Arc<AtomicU32>) -> Self {
+    pub fn new(
+        cfg: AppConfig,
+        req_id_counter: Arc<AtomicU32>,
+        tracked_contracts: Arc<RwLock<BTreeSet<u64>>>,
+    ) -> Self {
         Self {
             cfg,
             req_id_counter,
             dropped_events: Arc::new(AtomicU64::new(0)),
+            tracked_contracts,
         }
     }
 
@@ -214,8 +219,6 @@ impl DerivWebSocketClient {
         mut command_rx: mpsc::Receiver<WebSocketCommand>,
     ) -> Result<()> {
         let ws_url = self.ws_url()?;
-        let mut tracked_contracts = BTreeSet::new();
-
         let mut current_backoff = self.cfg.reconnect_backoff;
 
         loop {
@@ -232,12 +235,7 @@ impl DerivWebSocketClient {
                     current_backoff = self.cfg.reconnect_backoff;
 
                     if let Err(err) = self
-                        .handle_connection(
-                            stream,
-                            &event_tx,
-                            &mut command_rx,
-                            &mut tracked_contracts,
-                        )
+                        .handle_connection(stream, &event_tx, &mut command_rx)
                         .await
                     {
                         error!(error = %err, "connection handler failed; dropping connection");
@@ -254,26 +252,11 @@ impl DerivWebSocketClient {
                 &self.dropped_events,
             )?;
 
-            // Non-blocking drain loop: poll command_rx while waiting for reconnect.
-            // This prevents the channel from filling up and leaking memory in tracked_contracts.
-            let backoff_timer = tokio::time::sleep(current_backoff);
+            tokio::time::sleep(current_backoff).await;
 
             // Exponentially increase backoff for the next attempt, capped at 60s
             current_backoff =
                 std::cmp::min(current_backoff * 2, std::time::Duration::from_secs(60));
-
-            tokio::pin!(backoff_timer);
-            loop {
-                tokio::select! {
-                    _ = &mut backoff_timer => break,
-                    maybe_cmd = command_rx.recv() => {
-                        if let Some(WebSocketCommand::ClearTrackedContract { contract_id }) = maybe_cmd {
-                            tracked_contracts.remove(&contract_id);
-                        }
-                        // Ignore other commands during disconnection
-                    }
-                }
-            }
         }
     }
 
@@ -284,7 +267,6 @@ impl DerivWebSocketClient {
         >,
         event_tx: &mpsc::Sender<WebSocketEvent>,
         command_rx: &mut mpsc::Receiver<WebSocketCommand>,
-        tracked_contracts: &mut BTreeSet<u64>,
     ) -> Result<()> {
         try_emit(
             event_tx,
@@ -321,7 +303,9 @@ impl DerivWebSocketClient {
             &self.dropped_events,
         )?;
 
-        for &contract_id in &*tracked_contracts {
+        // Resubscribe to tracked contracts from the shared state
+        let contracts_to_resubscribe: Vec<u64> = self.tracked_contracts.read().iter().copied().collect();
+        for contract_id in contracts_to_resubscribe {
             self.send_json(
                 &mut write,
                 &ProposalOpenContractRequest {
@@ -365,16 +349,13 @@ impl DerivWebSocketClient {
                             }).await?;
                         }
                         WebSocketCommand::SubscribeOpenContract { contract_id, req_id } => {
-                            tracked_contracts.insert(contract_id);
+                            self.tracked_contracts.write().insert(contract_id);
                             self.send_json(&mut write, &ProposalOpenContractRequest {
                                 proposal_open_contract: 1,
                                 contract_id,
                                 subscribe: 1,
                                 req_id: Some(req_id),
                             }).await?;
-                        }
-                        WebSocketCommand::ClearTrackedContract { contract_id } => {
-                            tracked_contracts.remove(&contract_id);
                         }
                     }
                 }

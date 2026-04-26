@@ -512,7 +512,7 @@ class CollectionService:
                         tick_count = 0
                         last_report = now
 
-            except (ConnectionClosed, WebSocketException) as e:
+            except (ConnectionClosed, WebSocketException, OSError, asyncio.TimeoutError) as e:
                 if self.shutdown_event.is_set():
                     break
                 attempt += 1
@@ -522,20 +522,20 @@ class CollectionService:
                 delay = _backoff(attempt)
                 self.stats.reconnects += 1
                 logger.warning(
-                    f"Connection lost ({e}). Reconnect #{attempt}/{MAX_RECONNECT_ATTEMPTS} "
+                    f"Connection lost or network error ({type(e).__name__}: {e}). Reconnect #{attempt}/{MAX_RECONNECT_ATTEMPTS} "
                     f"in {delay:.1f}s..."
                 )
                 await self._sleep(delay)
-                try:
-                    await self.client.connect()
-                except Exception as conn_err:
-                    logger.error(f"Reconnect failed: {conn_err}")
 
             except Exception as e:
                 if self.shutdown_event.is_set():
                     break
                 logger.error(f"Unexpected live error: {e}", exc_info=True)
-                break
+                attempt += 1
+                if attempt > MAX_RECONNECT_ATTEMPTS:
+                    break
+                delay = _backoff(attempt)
+                await self._sleep(delay)
 
     def signal_shutdown(self):
         logger.info("Shutdown signal received.")

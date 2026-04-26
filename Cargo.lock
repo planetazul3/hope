@@ -522,6 +522,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "parking_lot",
  "secrecy",
  "serde",
  "serde_json",
