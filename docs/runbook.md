@@ -42,7 +42,7 @@ LOG_LEVEL=debug make run
     ```bash
     make export
     ```
-2.  **Train Model** (Optional): Upload `data/ticks.csv` to a cloud platform like Google Colab and run the training notebook using `notebooks/train_transformer.ipynb`.
+2.  **Train Model** (Optional): Upload `data/ticks.csv` to a cloud platform like Google Colab or Kaggle and run the training notebook using `notebooks/colab_training.ipynb` or `notebooks/kaggle_training.ipynb`.
 3.  **Run Simulation**:
     ```bash
     make backtest

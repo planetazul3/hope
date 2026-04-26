@@ -35,7 +35,7 @@ class ConsolidateProjectSourcesTest(unittest.TestCase):
 
             snapshot = output_path.read_text(encoding="utf-8")
 
-            self.assertIn('<file path="notebooks/train_transformer.ipynb"', snapshot)
+            self.assertIn('<file path="notebooks/colab_training.ipynb"', snapshot)
             self.assertIn(
                 '<file path="scripts/hope_ml/common.py"',
                 snapshot,

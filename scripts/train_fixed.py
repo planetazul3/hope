@@ -70,8 +70,24 @@ def generate_ed25519_keypair_and_sign(model_path):
     except Exception as e:
         logger.error(f"Failed to generate Ed25519 signature: {e}")
 
-def main():
-    csv_path = "data/ticks.csv"
+def main(csv_path: str = None):
+    # Path Agnosticism: Fallback detection for cloud environments
+    if csv_path is None:
+        fallbacks = [
+            "/kaggle/input/ticks-csv/ticks.csv",
+            "/kaggle/working/hope/data/ticks.csv",
+            "/content/hope/data/ticks.csv",
+            "/content/drive/MyDrive/hope/data/ticks.csv",
+            "data/ticks.csv"
+        ]
+        for path in fallbacks:
+            if os.path.exists(path):
+                csv_path = path
+                break
+        
+    if csv_path is None:
+        csv_path = "data/ticks.csv" # Final default
+        
     seq_len = 32
     input_dim = 8
 

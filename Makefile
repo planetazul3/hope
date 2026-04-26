@@ -47,6 +47,10 @@ train:
 	@echo "Upload data/ticks.csv to Google Colab or Kaggle and execute notebooks/colab_training.ipynb or notebooks/kaggle_training.ipynb in a cloud GPU environment."
 	@echo "All training scripts contain runtime guards that abort execution if a cloud environment is not detected."
 
+restore-nb:
+	$(PYTHON) restore_nb.py
+	@echo "Notebooks restored. Run 'git add notebooks/' to commit."
+
 export:
 	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
 	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-R_100}}; \

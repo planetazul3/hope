@@ -67,6 +67,7 @@ All model training and export workflows must adhere to these standards:
 - **Batching**: Use PyTorch `DataLoader` and `TensorDataset`.
 - **Integrity**: Always load the best recorded state dictionary before exporting to ONNX.
 - **Export**: ONNX models must use static graphs (batch size 1, sequence length 32) and dynamic INT8 Quantization (`QuantType.QInt8`).
+- **Path Agnosticism**: Training scripts must implement automatic fallback detection for cloud environments (Kaggle Dataset inputs, `/kaggle/working/hope/`, `/content/hope/`, and Google Drive mounts) to ensure robust execution across different clone locations.
 - **Balance**: Loss functions must use Focal Loss with Label Smoothing.
 
 ## Testing Guidelines

@@ -9,7 +9,7 @@ The initial Transformer V2 training pipeline was functional but lacked robust tr
 
 ## Decision
 
-We have implemented a suite of optimizations in the ML training pipeline (`scripts/train.py` and `notebooks/train_transformer.ipynb`):
+We have implemented a suite of optimizations in the ML training pipeline (`scripts/train_fixed.py`, `notebooks/colab_training.ipynb`, and `notebooks/kaggle_training.ipynb`):
 
 1.  **Early Stopping & LR Scheduling**: Introduced `ReduceLROnPlateau` to dynamically adjust learning rates and an early stopping mechanism to preserve the best model weights based on validation loss.
 2.  **Class Weight Balancing**: Implemented manual weighting in the Binary Cross-Entropy loss to handle market direction imbalances.
