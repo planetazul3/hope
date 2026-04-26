@@ -1,15 +1,19 @@
+# ----------------------------------------------------------------------
 # Rust
+# ----------------------------------------------------------------------
 /target
 **/*.rs.bk
+tarpaulin-report.html
+flamegraph.svg
 
+# ----------------------------------------------------------------------
 # Python
+# ----------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
-venv/
 build/
 develop-eggs/
 dist/
@@ -27,38 +31,53 @@ wheels/
 *.egg
 .pytest_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+.ipynb_checkpoints/
 
+# ----------------------------------------------------------------------
 # Data & Models
+# ----------------------------------------------------------------------
+data/
 *.log
 *.onnx
-model_quantized.onnx
 *.onnx.data
 *.pt
 *.pth
-data/
-data/*
 *.zip
-*.db
 *.csv
+*.gz
+*.parquet
+*.db
+*.db-wal
+*.db-shm
 
-# Environment & Secret
+# ----------------------------------------------------------------------
+# Environment & Secrets
+# ----------------------------------------------------------------------
 .env
 .env.*
 !.env.example
-.venv
-antigravity_venv/
 *venv*/
+env/
+*.pem
+*.key
+secrets.json
+credentials.json
 
+# ----------------------------------------------------------------------
 # IDEs & OS
+# ----------------------------------------------------------------------
 .vscode/
 .idea/
 *.swp
 *.swo
 .DS_Store
+Thumbs.db
 
+# ----------------------------------------------------------------------
 # Project Specific
+# ----------------------------------------------------------------------
 .codex
 *_merged_sources*.txt
-data/ticks.csv
-data/tick_store.db
-venv_pytest/
