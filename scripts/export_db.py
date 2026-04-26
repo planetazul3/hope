@@ -215,7 +215,7 @@ def export_ticks(args):
                         # but for hardening we should try to append.
                         chunk.to_parquet(parquet_path, index=False, engine='fastparquet', append=os.path.exists(parquet_path))
                     except (ImportError, TypeError):
-                        # Fallback for pyarrow or if fastparquet fails
+                        # Fallback for pyarrow only works for non-incremental (first chunk of fresh file)
                         import pyarrow as pa
                         import pyarrow.parquet as pq
                         table = pa.Table.from_pandas(chunk)
@@ -224,8 +224,11 @@ def export_ticks(args):
                             writer.write_table(table)
                             writer.close()
                         else:
-                            print("WARNING: 'fastparquet' is required for safe incremental Parquet appends. PyArrow fallback is disabled to prevent OOM.")
-                            pass
+                            raise RuntimeError(
+                                "The 'fastparquet' library is required for incremental Parquet exports. "
+                                "PyArrow fallback is disabled to prevent silent data loss. "
+                                "Please run: pip install fastparquet"
+                            )
 
                 # Streaming Validation
                 if args.validate:

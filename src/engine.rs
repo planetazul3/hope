@@ -377,17 +377,42 @@ impl Engine {
                     }
 
                     let probability_up = self.pending_probability.unwrap_or(0.5);
-                    self.pending_proposal = Some(PendingProposal {
-                        quote: ProposalQuote { id, ask_price },
-                        probability_up,
-                        received_at: Instant::now(),
-                    });
+                    let quote = ProposalQuote {
+                        id: id.clone(),
+                        ask_price,
+                    };
+
                     self.pending_req_id = None;
                     self.pending_probability = None;
 
-                    if self.fsm.state() != TradingState::OrderPending {
-                        safe_reset(&mut self.fsm);
-                        self.fsm.transition(TradingState::OrderPending)?;
+                    // Optimization: Attempt immediate buy to eliminate 1-tick latency
+                    let buy_req_id = self.next_req_id();
+                    if let Err(reason) = try_send_buy(
+                        &mut self.execution,
+                        command_tx,
+                        &quote,
+                        Instant::now(),
+                        buy_req_id,
+                    ) {
+                        warn!(?reason, "immediate buy skipped; falling back to next tick");
+                        self.pending_proposal = Some(PendingProposal {
+                            quote,
+                            probability_up,
+                            received_at: Instant::now(),
+                        });
+                        if self.fsm.state() != TradingState::OrderPending {
+                            safe_reset(&mut self.fsm);
+                            let _ = self.fsm.transition(TradingState::OrderPending);
+                        }
+                    } else {
+                        info!(proposal_id = %id, "immediate buy sent");
+                        self.pending_req_id = Some(buy_req_id);
+                        self.order_sent_at = Some(Instant::now());
+                        self.pending_proposal = None;
+                        if self.fsm.state() != TradingState::OrderPending {
+                            safe_reset(&mut self.fsm);
+                            let _ = self.fsm.transition(TradingState::OrderPending);
+                        }
                     }
                 }
                 TradeUpdate::BuyAccepted {
@@ -473,15 +498,8 @@ impl Engine {
                 }
 
                 if req_id.is_some() && req_id == self.pending_subscription_req_id {
-                    error!(?req_id, ?self.active_contract_id, "contract resubscription failed; clearing state to prevent hang");
-                    if let Some(contract_id) = self.active_contract_id {
-                        let _ = command_tx
-                            .try_send(WebSocketCommand::ClearTrackedContract { contract_id });
-                    }
-                    self.active_contract_id = None;
-                    self.contract_started_at = None;
+                    error!(?req_id, ?self.active_contract_id, "contract resubscription failed; relying on safety timeout");
                     self.pending_subscription_req_id = None;
-                    safe_reset(&mut self.fsm);
                 }
             }
             WebSocketEvent::Status(status) => match status {
@@ -491,7 +509,9 @@ impl Engine {
                 ConnectionStatus::SubscribedTicks => info!("tick subscription active"),
                 ConnectionStatus::Disconnected => {
                     warn!("websocket disconnected; clearing pending state");
-                    safe_reset(&mut self.fsm);
+                    if self.fsm.state() != TradingState::Cooldown {
+                        safe_reset(&mut self.fsm);
+                    }
                     self.pending_proposal = None;
                     self.order_sent_at = None;
                     self.pending_req_id = None;

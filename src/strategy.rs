@@ -150,7 +150,7 @@ where
         }
 
         // Clamp to ensure it doesn't fall below floor
-        adjusted_threshold = adjusted_threshold.max(self.threshold - self.volatility_penalty);
+        adjusted_threshold = adjusted_threshold.max(self.threshold - self.momentum_reward);
 
         // General trend is positive if probability_up > 0.5 (driven by positive drift)
         // General trend is negative if probability_down > 0.5 (driven by negative drift)

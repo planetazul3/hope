@@ -42,6 +42,10 @@ pub struct TickProcessor {
     last_direction: Direction,
     last_streak: u32,
     ticks_since_reversal: u32,
+    sum_returns: f64,
+    sq_sum_returns: f64,
+    long_sum_returns: f64,
+    long_sq_sum_returns: f64,
 }
 
 impl Default for TickProcessor {
@@ -67,6 +71,10 @@ impl TickProcessor {
             last_direction: Direction::Flat,
             last_streak: 0,
             ticks_since_reversal: 0,
+            sum_returns: 0.0,
+            sq_sum_returns: 0.0,
+            long_sum_returns: 0.0,
+            long_sq_sum_returns: 0.0,
         }
     }
 
@@ -130,6 +138,34 @@ impl TickProcessor {
         self.ring[self.next_index] = snapshot_without_stats;
         self.next_index = (self.next_index + 1) % Self::CAPACITY;
         self.len = self.len.saturating_add(1).min(Self::CAPACITY);
+
+        // O(1) Incremental Stats Update
+        if let Some(_) = self.last_price {
+            // Short-term window
+            if self.len > Self::VOLATILITY_WINDOW {
+                let idx_out = (self.next_index + Self::CAPACITY - Self::VOLATILITY_WINDOW - 1)
+                    % Self::CAPACITY;
+                let next_idx_out = (idx_out + 1) % Self::CAPACITY;
+                let ret_out = self.ring[next_idx_out].price - self.ring[idx_out].price;
+                self.sum_returns -= ret_out;
+                self.sq_sum_returns -= ret_out.powi(2);
+            }
+            self.sum_returns += current_return;
+            self.sq_sum_returns += current_return.powi(2);
+
+            // Long-term window
+            if self.len > Self::LONG_VOLATILITY_WINDOW {
+                let idx_out = (self.next_index + Self::CAPACITY - Self::LONG_VOLATILITY_WINDOW - 1)
+                    % Self::CAPACITY;
+                let next_idx_out = (idx_out + 1) % Self::CAPACITY;
+                let ret_out = self.ring[next_idx_out].price - self.ring[idx_out].price;
+                self.long_sum_returns -= ret_out;
+                self.long_sq_sum_returns -= ret_out.powi(2);
+            }
+            self.long_sum_returns += current_return;
+            self.long_sq_sum_returns += current_return.powi(2);
+        }
+
         self.last_price = Some(price);
         self.last_direction = direction;
         self.last_streak = streak;
@@ -158,19 +194,9 @@ impl TickProcessor {
             return (0.0, 0.0, a1, d1);
         }
 
-        let mut sum = 0.0;
-        let mut sq_sum = 0.0;
-        for i in 0..(count - 1) {
-            let idx = (self.next_index + Self::CAPACITY - count + i) % Self::CAPACITY;
-            let next_idx = (idx + 1) % Self::CAPACITY;
-            let ret = self.ring[next_idx].price - self.ring[idx].price;
-            sum += ret;
-            sq_sum += ret.powi(2);
-        }
-
         let n = (count - 1) as f64;
-        let mean = sum / n;
-        let variance = (sq_sum / n) - mean.powi(2);
+        let mean = self.sum_returns / n;
+        let variance = (self.sq_sum_returns / n) - mean.powi(2);
         let std_dev = variance.max(0.0).sqrt();
 
         (std_dev, mean, a1, d1)
@@ -182,19 +208,9 @@ impl TickProcessor {
             return 0.0;
         }
 
-        let mut sum = 0.0;
-        let mut sq_sum = 0.0;
-        for i in 0..(count - 1) {
-            let idx = (self.next_index + Self::CAPACITY - count + i) % Self::CAPACITY;
-            let next_idx = (idx + 1) % Self::CAPACITY;
-            let ret = self.ring[next_idx].price - self.ring[idx].price;
-            sum += ret;
-            sq_sum += ret.powi(2);
-        }
-
         let n = (count - 1) as f64;
-        let mean = sum / n;
-        let variance = (sq_sum / n) - mean.powi(2);
+        let mean = self.long_sum_returns / n;
+        let variance = (self.long_sq_sum_returns / n) - mean.powi(2);
         variance.max(0.0).sqrt()
     }
 
