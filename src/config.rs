@@ -204,7 +204,11 @@ fn load_dotenv(path: &str) -> Result<HashMap<String, String>> {
         };
 
         // Strip inline comments (e.g. VAR=val # comment)
-        let value_without_comment = raw_value.split('#').next().unwrap_or(raw_value);
+        let value_without_comment = if let Some(idx) = raw_value.find(" #") {
+            &raw_value[..idx]
+        } else {
+            raw_value
+        };
         let cleaned = value_without_comment
             .trim()
             .trim_matches('"')

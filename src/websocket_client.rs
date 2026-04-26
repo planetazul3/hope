@@ -214,6 +214,8 @@ impl DerivWebSocketClient {
         let ws_url = self.ws_url()?;
         let mut tracked_contracts = BTreeSet::new();
 
+        let mut current_backoff = self.cfg.reconnect_backoff;
+
         loop {
             try_emit(
                 &event_tx,
@@ -224,6 +226,9 @@ impl DerivWebSocketClient {
 
             match connect_async(ws_url.as_str()).await {
                 Ok((stream, _)) => {
+                    // Reset backoff on successful connection
+                    current_backoff = self.cfg.reconnect_backoff;
+
                     if let Err(err) = self
                         .handle_connection(
                             stream,
@@ -249,7 +254,12 @@ impl DerivWebSocketClient {
 
             // Non-blocking drain loop: poll command_rx while waiting for reconnect.
             // This prevents the channel from filling up and leaking memory in tracked_contracts.
-            let backoff_timer = tokio::time::sleep(self.cfg.reconnect_backoff);
+            let backoff_timer = tokio::time::sleep(current_backoff);
+
+            // Exponentially increase backoff for the next attempt, capped at 60s
+            current_backoff =
+                std::cmp::min(current_backoff * 2, std::time::Duration::from_secs(60));
+
             tokio::pin!(backoff_timer);
             loop {
                 tokio::select! {

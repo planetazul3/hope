@@ -51,7 +51,7 @@ impl Default for TickProcessor {
 }
 
 impl TickProcessor {
-    pub const CAPACITY: usize = 64;
+    pub const CAPACITY: usize = 256;
     /// Window size for volatility and drift calculation.
     /// ADR 0006 specifies this horizon for short-term responsive trend detection.
     pub const VOLATILITY_WINDOW: usize = 10;
@@ -233,8 +233,8 @@ mod tests {
         assert_eq!(fourth.direction.as_i8(), -1);
         assert_eq!(fourth.streak, 1);
 
-        for index in 0..128 {
-            processor.push(index, index as f64);
+        for index in 0..TickProcessor::CAPACITY {
+            processor.push(index as u64, index as f64);
         }
         assert_eq!(processor.len(), TickProcessor::CAPACITY);
     }

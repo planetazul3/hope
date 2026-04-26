@@ -66,7 +66,7 @@ fn main() -> Result<()> {
 
     let stake = config.stake;
     let payout_ratio = config.payout_ratio;
-    let mut history_buffer = [TickSnapshot::default(); 64];
+    let mut history_buffer = [TickSnapshot::default(); 256];
 
     for line in reader.lines() {
         let line = line?;
@@ -107,15 +107,19 @@ fn main() -> Result<()> {
                         SignalDirection::Up => {
                             if quote > entry_price {
                                 stake * payout_ratio
-                            } else {
+                            } else if quote < entry_price {
                                 -stake
+                            } else {
+                                0.0
                             }
                         }
                         SignalDirection::Down => {
                             if quote < entry_price {
                                 stake * payout_ratio
-                            } else {
+                            } else if quote > entry_price {
                                 -stake
+                            } else {
+                                0.0
                             }
                         }
                     };

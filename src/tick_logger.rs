@@ -1,7 +1,7 @@
 use std::{
     fs::OpenOptions,
     io::{BufWriter, Write},
-    sync::mpsc::{self, SyncSender, TrySendError},
+    sync::mpsc::{self, SyncSender},
     thread,
 };
 
@@ -93,8 +93,15 @@ impl TickLogger {
             latency_ms,
         };
 
-        if let Err(TrySendError::Full(_)) = self.tx.try_send(record) {
-            warn!("tick log channel full; dropping tick audit line");
+        if let Err(err) = self.tx.try_send(record) {
+            match err {
+                mpsc::TrySendError::Full(_) => {
+                    warn!("tick log channel full; dropping tick audit line")
+                }
+                mpsc::TrySendError::Disconnected(_) => {
+                    warn!("tick log channel disconnected; dropping tick audit line")
+                }
+            }
         }
     }
 }

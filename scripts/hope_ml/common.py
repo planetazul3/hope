@@ -92,8 +92,8 @@ def prepare_features(prices, seq_len=32):
     directions = np.sign(returns)
     magnitudes = np.abs(returns)
 
-    vol = pd.Series(returns).rolling(window=10, min_periods=1).std().fillna(0).values
-    long_term_vol = pd.Series(returns).rolling(window=50, min_periods=1).std().fillna(0).values
+    vol = pd.Series(returns).rolling(window=10, min_periods=1).std(ddof=0).fillna(0).values
+    long_term_vol = pd.Series(returns).rolling(window=50, min_periods=1).std(ddof=0).fillna(0).values
     vol_ratio = vol / (long_term_vol + 1e-8)
 
     norm_magnitudes = magnitudes / (vol + 1e-8)

@@ -72,6 +72,7 @@ struct Engine {
     req_id_counter: Arc<AtomicU32>,
     history_buffer: Vec<TickSnapshot>,
     balance: f64,
+    buffered_close_event: Option<(u64, f64)>,
 }
 
 impl Engine {
@@ -134,6 +135,7 @@ impl Engine {
             ],
             config,
             balance: 0.0,
+            buffered_close_event: None,
         }
     }
 
@@ -418,6 +420,18 @@ impl Engine {
                         error!("failed to queue open contract subscription");
                     }
                     info!(%contract_id, %buy_price, "buy confirmed");
+
+                    // Race Condition Check: If an OpenContract (closed) arrived BEFORE BuyAccepted,
+                    // we need to process it now.
+                    if let Some((closed_id, profit)) = self.buffered_close_event.take() {
+                        if closed_id == contract_id {
+                            info!(%contract_id, %profit, "processing buffered close event for contract");
+                            self.process_contract_closure(contract_id, profit, command_tx)?;
+                        } else {
+                            // If it's a different contract, put it back or discard (should not happen in strict FSM)
+                            self.buffered_close_event = Some((closed_id, profit));
+                        }
+                    }
                 }
                 TradeUpdate::OpenContract(update) => {
                     if update.req_id.is_some() && update.req_id == self.pending_subscription_req_id
@@ -427,58 +441,18 @@ impl Engine {
 
                     if update.is_sold.unwrap_or(0) == 1 {
                         if Some(update.contract_id) != self.active_contract_id {
-                            warn!(contract_id = update.contract_id, "received close event for untracked or already closed contract; ignoring");
+                            if self.fsm.state() == TradingState::OrderPending {
+                                info!(contract_id = update.contract_id, "buffering early close event for contract (BuyAccepted not yet received)");
+                                self.buffered_close_event =
+                                    Some((update.contract_id, update.profit.unwrap_or(0.0)));
+                            } else {
+                                warn!(contract_id = update.contract_id, "received close event for untracked or already closed contract; ignoring");
+                            }
                             return Ok(());
                         }
 
                         let profit = update.profit.unwrap_or(0.0);
-                        let old_balance = self.balance;
-                        self.balance += profit;
-                        let outcome = self.risk.on_trade_closed(profit);
-
-                        let win_rate = if outcome.total_trades > 0 {
-                            (outcome.wins as f64 / outcome.total_trades as f64) * 100.0
-                        } else {
-                            0.0
-                        };
-
-                        info!(
-                            contract_id = update.contract_id,
-                            profit = %format!("{:.2}", profit),
-                            old_balance = %format!("{:.2}", old_balance),
-                            new_balance = %format!("{:.2}", self.balance),
-                            total_trades = %outcome.total_trades,
-                            wins = %outcome.wins,
-                            losses = %outcome.losses,
-                            win_rate = %format!("{:.2}%", win_rate),
-                            session_profit = %format!("{:.2}", outcome.total_profit),
-                            "contract closed"
-                        );
-
-                        let closed_contract_id = update.contract_id;
-                        self.active_contract_id = None;
-                        self.contract_started_at = None;
-                        self.pending_subscription_req_id = None;
-                        let _ = command_tx.try_send(WebSocketCommand::ClearTrackedContract {
-                            contract_id: closed_contract_id,
-                        });
-
-                        if outcome.enter_cooldown {
-                            self.cooldown_remaining = self.config.cooldown_ticks;
-                            if self.fsm.state() == TradingState::InPosition {
-                                self.fsm.transition(TradingState::Cooldown)?;
-                            } else {
-                                safe_reset(&mut self.fsm);
-                                self.fsm.transition(TradingState::Cooldown)?;
-                            }
-                            warn!(
-                                consecutive_losses = outcome.consecutive_losses,
-                                cooldown_ticks = self.cooldown_remaining,
-                                "entered cooldown"
-                            );
-                        } else {
-                            safe_reset(&mut self.fsm);
-                        }
+                        self.process_contract_closure(update.contract_id, profit, command_tx)?;
                     }
                 }
             },
@@ -525,6 +499,62 @@ impl Engine {
                 }
             },
         }
+        Ok(())
+    }
+
+    fn process_contract_closure(
+        &mut self,
+        contract_id: u64,
+        profit: f64,
+        command_tx: &mpsc::Sender<WebSocketCommand>,
+    ) -> Result<()> {
+        let old_balance = self.balance;
+        self.balance += profit;
+        let outcome = self.risk.on_trade_closed(profit);
+
+        let win_rate = if outcome.total_trades > 0 {
+            (outcome.wins as f64 / outcome.total_trades as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        info!(
+            contract_id,
+            profit = %format!("{:.2}", profit),
+            old_balance = %format!("{:.2}", old_balance),
+            new_balance = %format!("{:.2}", self.balance),
+            total_trades = %outcome.total_trades,
+            wins = %outcome.wins,
+            losses = %outcome.losses,
+            win_rate = %format!("{:.2}%", win_rate),
+            session_profit = %format!("{:.2}", outcome.total_profit),
+            "contract closed"
+        );
+
+        self.active_contract_id = None;
+        self.contract_started_at = None;
+        self.pending_subscription_req_id = None;
+        let _ = command_tx.try_send(WebSocketCommand::ClearTrackedContract { contract_id });
+
+        if outcome.enter_cooldown {
+            self.cooldown_remaining = self.config.cooldown_ticks;
+            if self.fsm.state() == TradingState::InPosition
+                || self.fsm.state() == TradingState::OrderPending
+            {
+                self.fsm.transition(TradingState::Cooldown)?;
+            } else {
+                safe_reset(&mut self.fsm);
+                self.fsm.transition(TradingState::Cooldown)?;
+            }
+            warn!(
+                consecutive_losses = outcome.consecutive_losses,
+                cooldown_ticks = self.cooldown_remaining,
+                "entered cooldown"
+            );
+        } else {
+            safe_reset(&mut self.fsm);
+        }
+
         Ok(())
     }
 }
