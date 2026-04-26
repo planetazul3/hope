@@ -79,8 +79,29 @@ fn main() -> Result<()> {
             continue;
         }
 
-        let epoch: u64 = parts[0].parse().unwrap_or(0);
-        let quote: f64 = parts[1].parse().unwrap_or(0.0);
+        // Robust parsing: handles legacy 2-col (epoch,quote) and modern 3-col (symbol,epoch,quote)
+        let (epoch_str, quote_str) = if parts.len() >= 3 {
+            (parts[1].trim(), parts[2].trim())
+        } else if parts.len() == 2 {
+            (parts[0].trim(), parts[1].trim())
+        } else {
+            continue; // Skip malformed or empty lines
+        };
+
+        let epoch: u64 = match epoch_str.parse() {
+            Ok(v) => v,
+            Err(_) => continue, // Likely a header or malformed line
+        };
+        let quote: f64 = match quote_str.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!(
+                    "Warning: skipping malformed quote '{}' at epoch {}",
+                    quote_str, epoch
+                );
+                continue;
+            }
+        };
         let snapshot = processor.push(epoch, quote);
         total_ticks += 1;
 

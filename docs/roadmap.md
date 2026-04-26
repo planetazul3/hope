@@ -12,8 +12,8 @@ Status values:
 
 ## Current Stage Summary
 
-- Current active stage: `Stage 10 - Noise-Resilient Strategy Evolution` (In Progress — one planned item remaining)
-- Next stage: `Stage 11 - ML Quality and Cloud Enforcement` (Planned)
+- Current active stage: `Stage 12 - Production Hardening` (Planned)
+- Previous stage: `Stage 11 - ML Quality and Cloud Enforcement` (Done)
 - Overall state: Production-ready modular engine with zero-allocation hot paths, verified backtesting capabilities, and a standardized, observable ML pipeline with noise-resilient GatedTCN V4 architecture.
 
 ## Stage 1 - Deterministic Core Foundation
@@ -83,11 +83,11 @@ Status: `In Progress`
 
 ## Stage 11 - ML Quality and Cloud Enforcement
 
-Status: `Planned`
+Status: `Done`
 
-- Cloud-only training enforcement with runtime guards in all training entry points
-- Global reproducibility seeding (torch, numpy, random, cudnn deterministic)
-- Persistent cloud checkpoint saving during Phase 2 fine-tuning
-- Decision threshold sweep for empirical boundary selection and `.env` recommendation
-- DataLoader parallel data loading with `num_workers=2` and `pin_memory=True`
-- Comprehensive ML utility unit tests for `hope_ml.common` public API
+- [x] Cloud-only training enforcement with runtime guards in all training entry points
+- [x] Global reproducibility seeding (torch, numpy, random, cudnn deterministic)
+- [x] Persistent cloud checkpoint saving during Phase 2 fine-tuning
+- [x] Decision threshold sweep for empirical boundary selection and `.env` recommendation
+- [x] DataLoader parallel data loading with `num_workers=2` and `pin_memory=True`
+- [x] Comprehensive ML utility unit tests for `hope_ml.common` public API

@@ -1,8 +1,9 @@
 # Commands
 PYTHON ?= python3
 CARGO  ?= cargo
+SYMBOL ?= 
 
-.PHONY: help fmt check test verify run backtest export collect consolidate setup clean
+.PHONY: help fmt check test verify run backtest export collect consolidate setup clean restore-nb
 
 # Default target
 help:
@@ -14,7 +15,8 @@ help:
 	@echo "verify      : Format, check, and test everything"
 	@echo "run         : Start the trading engine"
 	@echo "backtest    : Run strategy backtesting on data/ticks.csv"
-	@echo "export      : Export ticks from SQLite to data/ticks.csv"
+	@echo "export      : Export ticks from SQLite to data/ticks.csv (use SYMBOL=R_100)"
+	@echo "restore-nb  : Regenerate notebooks/train_transformer.ipynb from template"
 	@echo "collect     : Collect historical ticks from Deriv API"
 	@echo "consolidate : Generate an audit snapshot of the project"
 	@echo "setup       : Install Python dependencies from requirements.txt"
@@ -43,10 +45,20 @@ train:
 	@echo "All training scripts contain runtime guards that abort execution if a cloud environment is not detected."
 
 export:
-	$(PYTHON) scripts/export_db.py
+	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
+	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-R_100}}; \
+	echo "Exporting ticks for symbol: $$TARGET_SYMBOL"; \
+	$(PYTHON) scripts/export_db.py --symbol $$TARGET_SYMBOL
 
 collect:
-	$(PYTHON) scripts/tick_collector.py --hours 24
+	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
+	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-1HZ100V}}; \
+	echo "Collecting ticks for symbol: $$TARGET_SYMBOL"; \
+	$(PYTHON) scripts/tick_collector.py --symbol $$TARGET_SYMBOL --hours 24
+
+restore-nb:
+	$(PYTHON) restore_nb.py
+	@echo "Notebook restored. Run 'git add notebooks/' to commit."
 
 consolidate:
 	$(PYTHON) consolidate_project_sources.py

@@ -13,14 +13,20 @@ We will use a simplified Finite State Machine (FSM) with the following states:
 2.  **OrderPending**: A signal has been generated, and we are waiting for a `proposal` quote or `buy` confirmation.
 3.  **InPosition**: A contract is active. All new signals are ignored.
 4.  **Cooldown**: A temporary state after a loss (or sequence of losses) where no evaluation occurs.
+5.  **Recovery**: A transient safeguard state entered when an API error occurs while `OrderPending` or when the WebSocket disconnects mid-trade.
 
 ### Valid Transitions
 -   `Idle` -> `OrderPending` (Signal generated)
 -   `Idle` -> `Cooldown` (Manual or risk-based override)
+-   `Idle` -> `Recovery` (Defensive guard from engine)
 -   `OrderPending` -> `InPosition` (Buy confirmation received)
 -   `OrderPending` -> `Idle` (Timeout or API error)
+-   `OrderPending` -> `Recovery` (API error on active request)
 -   `InPosition` -> `Idle` (Contract won/sold)
 -   `InPosition` -> `Cooldown` (Contract lost/sold with risk trigger)
+-   `InPosition` -> `Recovery` (Disconnect while holding contract)
+-   `Recovery` -> `Idle` (Clean reset after state verification)
+-   `Recovery` -> `InPosition` (Contract confirmed still open on reconnect)
 -   `Cooldown` -> `Idle` (Cooldown timer expired)
 
 ## Consequences

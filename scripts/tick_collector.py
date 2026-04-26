@@ -61,11 +61,11 @@ class TickStore:
                 symbol TEXT    NOT NULL,
                 epoch  REAL    NOT NULL,
                 quote  REAL    NOT NULL,
-                UNIQUE(symbol, epoch, quote)
+                UNIQUE(symbol, epoch)
             )
         """)
         self.conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_symbol_epoch_quote ON ticks(symbol, epoch, quote)"
+            "CREATE INDEX IF NOT EXISTS idx_symbol_epoch ON ticks(symbol, epoch)"
         )
         self.conn.commit()
 

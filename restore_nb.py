@@ -96,8 +96,11 @@ data_loading_src = [
     "        return None\n",
     "    \n",
     "    print(f\"Loading data from: {actual_path}\")\n",
-    "    df = pd.read_csv(actual_path, header=None, names=['epoch', 'quote'], nrows=limit if limit is not None else None)\n",
-    "    return df['quote'].values.astype(np.float32)\n"
+    "    df = pd.read_csv(actual_path, header=None, nrows=limit if limit is not None else None)\n",
+    "    # Support 2-col (epoch, quote) and 3-col (symbol, epoch, quote)\n",
+    "    if df.shape[1] >= 3: prices = df.iloc[:, 2].values\n",
+    "    else: prices = df.iloc[:, 1].values\n",
+    "    return prices.astype(np.float32)\n"
 ]
 
 # Cell 6: Main Training Loop (Tasks 26, 33)
@@ -167,7 +170,7 @@ training_src = [
     "plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)\n",
     "\n",
     "early_stop_patience = 5\n",
-    "patience_counter = 0\n",
+    "patience_counter = 0  # Task 33: Initialize before loop to avoid NameError\n",
     "best_auc = 0.0\n",
     "best_model = copy.deepcopy(model.state_dict())\n",
     "\n",

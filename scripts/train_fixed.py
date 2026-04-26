@@ -8,18 +8,33 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, precision_score, recall_score
 from torch.optim.lr_scheduler import LambdaLR
 
-# Add scripts to path
-sys.path.append(os.path.abspath('scripts'))
 from hope_ml.common import GatedTCNV4, prepare_features, contrastive_loss, focal_loss, block_mask
 from sklearn.metrics import precision_recall_curve, auc as pr_auc
+import random as _random
+
+# ── Reproducibility (Stage 11 requirement) ──────────────────────────────
+_SEED = 42
+_random.seed(_SEED)
+np.random.seed(_SEED)
+torch.manual_seed(_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(_SEED)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+# ────────────────────────────────────────────────────────────────────────
 
 def load_data_from_csv(csv_path):
     if not os.path.exists(csv_path):
         print(f"CSV not found: {csv_path}")
         return None
     print(f"Loading data from: {csv_path}")
-    df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'])
-    return df['quote'].values.astype(np.float32)
+    df = pd.read_csv(csv_path, header=None)
+    # Support 2-col (epoch, quote) and 3-col (symbol, epoch, quote)
+    if df.shape[1] >= 3:
+        prices = df.iloc[:, 2].values
+    else:
+        prices = df.iloc[:, 1].values
+    return prices.astype(np.float32)
 
 import requests
 
