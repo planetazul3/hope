@@ -215,6 +215,8 @@ impl Engine {
                             warn!(?self.active_contract_id, "active contract tracked for too long; forcing clear");
                             if let Some(contract_id) = self.active_contract_id {
                                 self.tracked_contracts.write().remove(&contract_id);
+                                // ADR 0008: Register forced clear as a loss to prevent risk manager bypass
+                                let _ = self.risk.on_trade_closed(-self.config.stake);
                             }
                             self.active_contract_id = None;
                             self.contract_started_at = None;
@@ -283,6 +285,7 @@ impl Engine {
                         &ready.quote,
                         tick_started_at,
                         req_id,
+                        false,
                     ) {
                         warn!(?reason, "buy skipped");
                         let probability_up = ready.probability_up;
@@ -339,6 +342,7 @@ impl Engine {
                         proposal_spec,
                         tick_started_at,
                         req_id,
+                        false,
                     ) {
                         warn!(?reason, "proposal skipped");
                         self.safe_reset();
@@ -412,6 +416,7 @@ impl Engine {
                         &quote,
                         Instant::now(),
                         buy_req_id,
+                        true, // Bypass rate limit for immediate buy optimization
                     ) {
                         warn!(?reason, "immediate buy skipped; falling back to next tick");
                         self.pending_proposal = Some(PendingProposal {
@@ -628,14 +633,22 @@ impl Engine {
     }
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        info!("shutting down trading engine; stopping tick logger");
+        self.tick_logger.stop();
+    }
+}
+
 fn try_send_proposal(
     execution: &mut ExecutionEngine,
     command_tx: &mpsc::Sender<WebSocketCommand>,
     proposal: ProposalSpec,
     now: Instant,
     req_id: u32,
+    bypass_rate_limit: bool,
 ) -> std::result::Result<(), crate::execution::ExecutionSkipReason> {
-    let guard = execution.permit_api_call(now)?;
+    let guard = execution.permit_api_call(now, bypass_rate_limit)?;
     command_tx
         .try_send(WebSocketCommand::RequestProposal { proposal, req_id })
         .map_err(|_| crate::execution::ExecutionSkipReason::InternalQueueFull)?;
@@ -649,8 +662,9 @@ fn try_send_buy(
     quote: &ProposalQuote,
     now: Instant,
     req_id: u32,
+    bypass_rate_limit: bool,
 ) -> std::result::Result<(), crate::execution::ExecutionSkipReason> {
-    let guard = execution.permit_api_call(now)?;
+    let guard = execution.permit_api_call(now, bypass_rate_limit)?;
     command_tx
         .try_send(WebSocketCommand::Buy {
             proposal_id: quote.id.clone(),

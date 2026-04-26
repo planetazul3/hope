@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
@@ -26,7 +26,6 @@ use parking_lot::RwLock;
 pub struct DerivWebSocketClient {
     cfg: AppConfig,
     req_id_counter: Arc<AtomicU32>,
-    dropped_events: Arc<AtomicU64>,
     tracked_contracts: Arc<RwLock<BTreeSet<u64>>>,
 }
 
@@ -38,7 +37,18 @@ pub enum WebSocketEvent {
     Status(ConnectionStatus),
 }
 
-#[derive(Debug, Clone, Copy)]
+impl WebSocketEvent {
+    #[cfg(test)]
+    pub fn as_status(&self) -> Option<ConnectionStatus> {
+        if let Self::Status(s) = self {
+            Some(*s)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {
     Connecting,
     Connected,
@@ -204,7 +214,6 @@ impl DerivWebSocketClient {
         Self {
             cfg,
             req_id_counter,
-            dropped_events: Arc::new(AtomicU64::new(0)),
             tracked_contracts,
         }
     }
@@ -225,8 +234,8 @@ impl DerivWebSocketClient {
             try_emit(
                 &event_tx,
                 WebSocketEvent::Status(ConnectionStatus::Connecting),
-                &self.dropped_events,
-            )?;
+            )
+            .await?;
             info!(url = %ws_url, "connecting to Deriv websocket");
 
             match connect_async(ws_url.as_str()).await {
@@ -249,8 +258,8 @@ impl DerivWebSocketClient {
             try_emit(
                 &event_tx,
                 WebSocketEvent::Status(ConnectionStatus::Disconnected),
-                &self.dropped_events,
-            )?;
+            )
+            .await?;
 
             tokio::time::sleep(current_backoff).await;
 
@@ -271,13 +280,24 @@ impl DerivWebSocketClient {
         try_emit(
             event_tx,
             WebSocketEvent::Status(ConnectionStatus::Connected),
-            &self.dropped_events,
-        )?;
+        )
+        .await?;
         info!("connected to Deriv websocket");
 
         let (mut write, mut read) = stream.split();
+        let (write_tx, mut write_rx) = mpsc::channel::<String>(128);
+
+        // Decouple writes into a dedicated task to prevent blocking the read loop
+        let _write_task = tokio::spawn(async move {
+            while let Some(msg) = write_rx.recv().await {
+                if let Err(err) = write.send(Message::Text(msg.into())).await {
+                    error!(error = %err, "websocket write failed; terminating write task");
+                    break;
+                }
+            }
+        });
         self.send_json(
-            &mut write,
+            &write_tx,
             &AuthorizeRequest {
                 authorize: self.cfg.token.expose_secret(),
                 req_id: Some(self.next_req_id()),
@@ -287,7 +307,7 @@ impl DerivWebSocketClient {
         .context("failed to authorize websocket session")?;
 
         self.send_json(
-            &mut write,
+            &write_tx,
             &TicksRequest {
                 ticks: &self.cfg.symbol,
                 subscribe: 1,
@@ -300,15 +320,15 @@ impl DerivWebSocketClient {
         try_emit(
             event_tx,
             WebSocketEvent::Status(ConnectionStatus::SubscribedTicks),
-            &self.dropped_events,
-        )?;
+        )
+        .await?;
 
         // Resubscribe to tracked contracts from the shared state
         let contracts_to_resubscribe: Vec<u64> =
             self.tracked_contracts.read().iter().copied().collect();
         for contract_id in contracts_to_resubscribe {
             self.send_json(
-                &mut write,
+                &write_tx,
                 &ProposalOpenContractRequest {
                     proposal_open_contract: 1,
                     contract_id,
@@ -340,10 +360,10 @@ impl DerivWebSocketClient {
                                 symbol: &proposal.symbol,
                                 req_id: Some(req_id),
                             };
-                            self.send_json(&mut write, &request).await?;
+                            self.send_json(&write_tx, &request).await?;
                         }
                         WebSocketCommand::Buy { proposal_id, price, req_id } => {
-                            self.send_json(&mut write, &BuyRequest {
+                            self.send_json(&write_tx, &BuyRequest {
                                 buy: &proposal_id,
                                 price,
                                 req_id: Some(req_id),
@@ -351,7 +371,7 @@ impl DerivWebSocketClient {
                         }
                         WebSocketCommand::SubscribeOpenContract { contract_id, req_id } => {
                             self.tracked_contracts.write().insert(contract_id);
-                            self.send_json(&mut write, &ProposalOpenContractRequest {
+                            self.send_json(&write_tx, &ProposalOpenContractRequest {
                                 proposal_open_contract: 1,
                                 contract_id,
                                 subscribe: 1,
@@ -418,8 +438,8 @@ impl DerivWebSocketClient {
                     message: safe_message,
                     req_id,
                 }),
-                &self.dropped_events,
-            )?;
+            )
+            .await?;
             return Ok(());
         }
 
@@ -435,13 +455,13 @@ impl DerivWebSocketClient {
                             balance: authorize.balance,
                             _req_id: req_id,
                         }),
-                        &self.dropped_events,
-                    )?;
+                    )
+                    .await?;
                     try_emit(
                         event_tx,
                         WebSocketEvent::Status(ConnectionStatus::Authorized),
-                        &self.dropped_events,
-                    )?;
+                    )
+                    .await?;
                 }
             }
             Some("tick") => {
@@ -452,8 +472,8 @@ impl DerivWebSocketClient {
                             epoch: tick.epoch,
                             quote: tick.quote,
                         }),
-                        &self.dropped_events,
-                    )?;
+                    )
+                    .await?;
                 }
             }
             Some("proposal") => {
@@ -466,8 +486,8 @@ impl DerivWebSocketClient {
                             ask_price: proposal.ask_price,
                             req_id,
                         }),
-                        &self.dropped_events,
-                    )?;
+                    )
+                    .await?;
                 }
             }
             Some("buy") => {
@@ -480,8 +500,8 @@ impl DerivWebSocketClient {
                             buy_price: buy.buy_price,
                             req_id,
                         }),
-                        &self.dropped_events,
-                    )?;
+                    )
+                    .await?;
                 }
             }
             Some("proposal_open_contract") => {
@@ -490,8 +510,8 @@ impl DerivWebSocketClient {
                     try_emit(
                         event_tx,
                         WebSocketEvent::TradeUpdate(TradeUpdate::OpenContract(update)),
-                        &self.dropped_events,
-                    )?;
+                    )
+                    .await?;
                 }
             }
             Some(other) => {
@@ -505,25 +525,16 @@ impl DerivWebSocketClient {
         Ok(())
     }
 
-    async fn send_json<T>(
-        &self,
-        write: &mut futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            Message,
-        >,
-        message: &T,
-    ) -> Result<()>
+    async fn send_json<T>(&self, write_tx: &mpsc::Sender<String>, message: &T) -> Result<()>
     where
         T: Serialize,
     {
         let payload =
             serde_json::to_string(message).context("failed to serialize websocket message")?;
-        write
-            .send(Message::Text(payload.into()))
+        write_tx
+            .send(payload)
             .await
-            .context("failed to send websocket message")
+            .map_err(|_| anyhow!("websocket write channel closed"))
     }
 
     fn ws_url(&self) -> Result<Url> {
@@ -537,35 +548,24 @@ impl DerivWebSocketClient {
     }
 }
 
-fn try_emit(
-    tx: &mpsc::Sender<WebSocketEvent>,
-    event: WebSocketEvent,
-    dropped: &AtomicU64,
-) -> Result<()> {
-    match tx.try_send(event) {
-        Ok(_) => Ok(()),
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            dropped.fetch_add(1, Ordering::Relaxed);
-            warn!("event channel full; dropping event");
-            Ok(())
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => Err(anyhow!("event channel closed")),
-    }
+async fn try_emit(tx: &mpsc::Sender<WebSocketEvent>, event: WebSocketEvent) -> Result<()> {
+    tx.send(event)
+        .await
+        .map_err(|_| anyhow!("event channel closed"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
-    #[test]
-    fn test_try_emit_success() {
+    #[tokio::test]
+    async fn test_try_emit_success() {
         let (tx, mut rx) = mpsc::channel(1);
-        let dropped = AtomicU64::new(0);
         let event = WebSocketEvent::Status(ConnectionStatus::Connected);
 
-        try_emit(&tx, event, &dropped).unwrap();
+        try_emit(&tx, event).await.unwrap();
 
-        assert_eq!(dropped.load(Ordering::Relaxed), 0);
         let received = rx.try_recv().unwrap();
         if let WebSocketEvent::Status(ConnectionStatus::Connected) = received {
             // ok
@@ -574,19 +574,33 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_try_emit_dropped() {
-        let (tx, _rx) = mpsc::channel(1);
-        let dropped = AtomicU64::new(0);
+    #[tokio::test]
+    async fn test_try_emit_blocks_when_full() {
+        let (tx, mut rx) = mpsc::channel(1);
 
         // Fill the channel
-        tx.try_send(WebSocketEvent::Status(ConnectionStatus::Connected))
+        tx.send(WebSocketEvent::Status(ConnectionStatus::Connected))
+            .await
             .unwrap();
 
-        // Next emit should drop
+        // Next emit should block. We'll spawn it and check.
         let event = WebSocketEvent::Status(ConnectionStatus::Disconnected);
-        try_emit(&tx, event, &dropped).unwrap();
+        let handle = tokio::spawn(async move {
+            try_emit(&tx, event).await.unwrap();
+        });
 
-        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        // Small delay to ensure it's blocked
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!handle.is_finished());
+
+        // Drain one
+        rx.recv().await.unwrap();
+
+        // Now it should finish
+        handle.await.unwrap();
+        assert_eq!(
+            rx.recv().await.unwrap().as_status(),
+            Some(ConnectionStatus::Disconnected)
+        );
     }
 }

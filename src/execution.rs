@@ -90,14 +90,17 @@ impl ExecutionEngine {
     pub fn permit_api_call(
         &mut self,
         now: Instant,
+        bypass_rate_limit: bool,
     ) -> Result<PermitGuard<'_>, ExecutionSkipReason> {
-        if self.api_calls_this_tick >= 1 {
-            return Err(ExecutionSkipReason::ApiPerTickLimit);
-        }
+        if !bypass_rate_limit {
+            if self.api_calls_this_tick >= 1 {
+                return Err(ExecutionSkipReason::ApiPerTickLimit);
+            }
 
-        if let Some(last_api_call_at) = self.last_api_call_at {
-            if now.duration_since(last_api_call_at) < self.min_api_interval {
-                return Err(ExecutionSkipReason::RateLimited);
+            if let Some(last_api_call_at) = self.last_api_call_at {
+                if now.duration_since(last_api_call_at) < self.min_api_interval {
+                    return Err(ExecutionSkipReason::RateLimited);
+                }
             }
         }
 
@@ -144,11 +147,11 @@ mod tests {
         let now = Instant::now();
         execution.on_tick(10, now);
 
-        let guard = execution.permit_api_call(now).unwrap();
+        let guard = execution.permit_api_call(now, false).unwrap();
         guard.commit(); // Commit to keep the state
 
         assert_eq!(
-            execution.permit_api_call(now).unwrap_err(),
+            execution.permit_api_call(now, false).unwrap_err(),
             ExecutionSkipReason::ApiPerTickLimit
         );
     }

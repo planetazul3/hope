@@ -190,6 +190,7 @@ def export_ticks(args):
         # Parquet handling
         parquet_path = csv_path.replace('.csv', '').replace('.gz', '') + '.parquet'
         use_parquet = args.parquet
+        parquet_writer = None
         if use_parquet:
             try:
                 import pyarrow
@@ -200,47 +201,47 @@ def export_ticks(args):
                     print("Warning: Neither 'pyarrow' nor 'fastparquet' found. Parquet export will be disabled.")
                     use_parquet = False
 
-        with tqdm(total=total_rows, desc="Exporting", unit="ticks") as pbar:
-            for chunk in chunk_iter:
-                # CSV Export
-                header = False 
-                current_mode = mode if first_chunk else 'a'
-                chunk.to_csv(csv_path, index=False, header=header, mode=current_mode, compression=compression)
-                
-                # Incremental Parquet Export (Append)
-                if use_parquet:
-                    try:
-                        # fastparquet supports append; pyarrow requires reading/writing or partitioned files
-                        # We'll use a simpler 'concatenate and write' if file is small, 
-                        # but for hardening we should try to append.
-                        chunk.to_parquet(parquet_path, index=False, engine='fastparquet', append=os.path.exists(parquet_path))
-                    except (ImportError, TypeError):
-                        # Fallback for pyarrow only works for non-incremental (first chunk of fresh file)
-                        import pyarrow as pa
-                        import pyarrow.parquet as pq
-                        table = pa.Table.from_pandas(chunk)
-                        if first_chunk and mode == 'w':
-                            writer = pq.ParquetWriter(parquet_path, table.schema)
-                            writer.write_table(table)
-                            writer.close()
-                        else:
-                            raise RuntimeError(
-                                "The 'fastparquet' library is required for incremental Parquet exports. "
-                                "PyArrow fallback is disabled to prevent silent data loss. "
-                                "Please run: pip install fastparquet"
-                            )
+        try:
+            with tqdm(total=total_rows, desc="Exporting", unit="ticks") as pbar:
+                for chunk in chunk_iter:
+                    # CSV Export
+                    header = False 
+                    current_mode = mode if first_chunk else 'a'
+                    chunk.to_csv(csv_path, index=False, header=header, mode=current_mode, compression=compression)
+                    
+                    # Incremental Parquet Export (Append)
+                    if use_parquet:
+                        try:
+                            # fastparquet supports append
+                            chunk.to_parquet(parquet_path, index=False, engine='fastparquet', append=os.path.exists(parquet_path))
+                        except (ImportError, TypeError):
+                            # Pyarrow fallback logic: Keep writer open across chunks
+                            import pyarrow as pa
+                            import pyarrow.parquet as pq
+                            table = pa.Table.from_pandas(chunk)
+                            if parquet_writer is None:
+                                if not first_chunk or mode == 'a':
+                                     raise RuntimeError(
+                                        "The 'fastparquet' library is required for incremental Parquet exports. "
+                                        "PyArrow fallback only supports fresh exports."
+                                    )
+                                parquet_writer = pq.ParquetWriter(parquet_path, table.schema)
+                            parquet_writer.write_table(table)
 
-                # Streaming Validation
-                if args.validate:
-                    validate_data_streaming(chunk, last_states)
-                
-                # Stats (Incremental accumulation could be added here, for now we print per chunk if --stats)
-                if args.stats:
-                    print(f"\nChunk Stats:")
-                    print(chunk['quote'].describe())
+                    # Streaming Validation
+                    if args.validate:
+                        validate_data_streaming(chunk, last_states)
+                    
+                    # Stats
+                    if args.stats:
+                        print(f"\nChunk Stats:")
+                        print(chunk['quote'].describe())
 
-                pbar.update(len(chunk))
-                first_chunk = False
+                    pbar.update(len(chunk))
+                    first_chunk = False
+        finally:
+            if parquet_writer:
+                parquet_writer.close()
 
         if use_parquet:
             print(f"Successfully exported Parquet to {parquet_path}")

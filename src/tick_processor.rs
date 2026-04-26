@@ -143,7 +143,7 @@ impl TickProcessor {
         if let Some(_) = self.last_price {
             // Short-term window: subtract oldest return only if we have more returns than the window size
             if self.len > Self::VOLATILITY_WINDOW + 1 {
-                let idx_out = (self.next_index + Self::CAPACITY - Self::VOLATILITY_WINDOW - 1)
+                let idx_out = (self.next_index + Self::CAPACITY - Self::VOLATILITY_WINDOW - 2)
                     % Self::CAPACITY;
                 let next_idx_out = (idx_out + 1) % Self::CAPACITY;
                 let ret_out = self.ring[next_idx_out].price - self.ring[idx_out].price;
@@ -155,7 +155,7 @@ impl TickProcessor {
 
             // Long-term window: subtract oldest return only if we have more returns than the window size
             if self.len > Self::LONG_VOLATILITY_WINDOW + 1 {
-                let idx_out = (self.next_index + Self::CAPACITY - Self::LONG_VOLATILITY_WINDOW - 1)
+                let idx_out = (self.next_index + Self::CAPACITY - Self::LONG_VOLATILITY_WINDOW - 2)
                     % Self::CAPACITY;
                 let next_idx_out = (idx_out + 1) % Self::CAPACITY;
                 let ret_out = self.ring[next_idx_out].price - self.ring[idx_out].price;
@@ -189,12 +189,10 @@ impl TickProcessor {
     }
 
     fn calculate_stats(&self, a1: f64, d1: f64) -> (f64, f64, f64, f64) {
-        let count = self.len.min(Self::VOLATILITY_WINDOW);
-        if count < 2 {
+        let n = (self.len.saturating_sub(1)).min(Self::VOLATILITY_WINDOW) as f64;
+        if n < 1.0 {
             return (0.0, 0.0, a1, d1);
         }
-
-        let n = count as f64;
         let mean = self.sum_returns / n;
         let variance = (self.sq_sum_returns / n) - mean.powi(2);
         let std_dev = variance.max(0.0).sqrt();
@@ -203,12 +201,10 @@ impl TickProcessor {
     }
 
     fn calculate_long_term_volatility(&self) -> f64 {
-        let count = self.len.min(Self::LONG_VOLATILITY_WINDOW);
-        if count < 2 {
+        let n = (self.len.saturating_sub(1)).min(Self::LONG_VOLATILITY_WINDOW) as f64;
+        if n < 1.0 {
             return 0.0;
         }
-
-        let n = count as f64;
         let mean = self.long_sum_returns / n;
         let variance = (self.long_sq_sum_returns / n) - mean.powi(2);
         variance.max(0.0).sqrt()

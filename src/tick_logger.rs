@@ -8,7 +8,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::{fsm::TradingState, tick_processor::TickSnapshot};
 
@@ -25,7 +25,7 @@ pub struct TickLogRecord {
 }
 
 pub struct TickLogger {
-    tx: SyncSender<TickLogRecord>,
+    tx: Option<SyncSender<TickLogRecord>>,
     _handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -91,16 +91,19 @@ impl TickLogger {
         });
 
         Self {
-            tx,
+            tx: Some(tx),
             _handle: Some(_handle),
         }
     }
 
     /// Gracefully stops the logger and ensures all pending records are flushed to disk.
     pub fn stop(&mut self) {
-        // The sender is dropped when TickLogger is dropped or here.
-        // We don't have a way to drop tx if we only have a reference.
-        // But the main loop in main.rs will drop the engine, which drops the logger.
+        // Drop the sender to signal the background thread to exit
+        self.tx.take();
+        if let Some(handle) = self._handle.take() {
+            info!("waiting for tick logger thread to join...");
+            let _ = handle.join();
+        }
     }
 
     pub fn try_log(
@@ -122,13 +125,15 @@ impl TickLogger {
             latency_ms,
         };
 
-        if let Err(err) = self.tx.try_send(record) {
-            match err {
-                mpsc::TrySendError::Full(_) => {
-                    warn!("tick log channel full; dropping tick audit line")
-                }
-                mpsc::TrySendError::Disconnected(_) => {
-                    warn!("tick log channel disconnected; dropping tick audit line")
+        if let Some(ref tx) = self.tx {
+            if let Err(err) = tx.try_send(record) {
+                match err {
+                    mpsc::TrySendError::Full(_) => {
+                        warn!("tick log channel full; dropping tick audit line")
+                    }
+                    mpsc::TrySendError::Disconnected(_) => {
+                        warn!("tick log channel disconnected; dropping tick audit line")
+                    }
                 }
             }
         }
