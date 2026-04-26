@@ -15,7 +15,7 @@ try:
     import websockets
     from websockets.exceptions import ConnectionClosed, WebSocketException
 except ImportError:
-    print("ERROR: websockets not installed. Run: pip install websockets", file=sys.stderr)
+    logger.info("ERROR: websockets not installed. Run: pip install websockets", file=sys.stderr)
     sys.exit(1)
 
 # --- Configuration & Constants ---
@@ -86,9 +86,7 @@ class TickStore:
                 valid,
             )
             self.conn.commit()
-            # Use SQLite's changes() for accurate insert count
-            inserted = self.conn.execute("SELECT changes()").fetchone()[0]
-            return inserted
+            return cursor.rowcount
         except sqlite3.Error as e:
             logger.error(f"Database error: {e}")
             self.conn.rollback()
@@ -294,12 +292,12 @@ class CollectionService:
             {"active_symbols": "brief", "product_type": "basic", "landing_company": "svg"}
         )
         symbols = [s for s in resp["active_symbols"] if s["market"] == "synthetic_index"]
-        print(f"\n{'Symbol':<15} | {'Display Name':<30}")
-        print("-" * 50)
+        logger.info(f"\n{'Symbol':<15} | {'Display Name':<30}")
+        logger.info("-" * 50)
         for s in sorted(symbols, key=lambda x: x["symbol"]):
-            print(f"{s['symbol']:<15} | {s['display_name']:<30}")
-        print("-" * 50)
-        print(f"Total: {len(symbols)} synthetic symbols")
+            logger.info(f"{s['symbol']:<15} | {s['display_name']:<30}")
+        logger.info("-" * 50)
+        logger.info(f"Total: {len(symbols)} synthetic symbols")
 
     async def collect_history(
         self,

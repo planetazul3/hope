@@ -1,7 +1,7 @@
+use crossbeam_channel::{bounded, Sender, TrySendError};
 use std::{
     fs::OpenOptions,
     io::{BufWriter, Write},
-    sync::mpsc::{self, SyncSender},
     thread,
 };
 
@@ -25,7 +25,7 @@ pub struct TickLogRecord {
 }
 
 pub struct TickLogger {
-    tx: Option<SyncSender<TickLogRecord>>,
+    tx: Option<Sender<TickLogRecord>>,
     _handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -40,7 +40,7 @@ impl Clone for TickLogger {
 
 impl TickLogger {
     pub fn start(path: &str, capacity: usize) -> Self {
-        let (tx, rx) = mpsc::sync_channel::<TickLogRecord>(capacity);
+        let (tx, rx) = bounded::<TickLogRecord>(capacity);
         let path = path.to_string();
 
         let _handle = thread::spawn(move || {
@@ -128,10 +128,10 @@ impl TickLogger {
         if let Some(ref tx) = self.tx {
             if let Err(err) = tx.try_send(record) {
                 match err {
-                    mpsc::TrySendError::Full(_) => {
+                    TrySendError::Full(_) => {
                         warn!("tick log channel full; dropping tick audit line")
                     }
-                    mpsc::TrySendError::Disconnected(_) => {
+                    TrySendError::Disconnected(_) => {
                         warn!("tick log channel disconnected; dropping tick audit line")
                     }
                 }

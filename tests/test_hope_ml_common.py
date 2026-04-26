@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'scripts'))
-from hope_ml.common import focal_loss, contrastive_loss, block_mask, prepare_features
+from hope_ml.common import focal_loss, contrastive_loss, ts2vec_mask, prepare_features
 
 
 class TestHopeMlCommon(unittest.TestCase):
@@ -25,9 +25,9 @@ class TestHopeMlCommon(unittest.TestCase):
         self.assertEqual(loss.shape, torch.Size([]))
         self.assertGreaterEqual(loss.item(), 0.0)
 
-    def test_block_mask_preserves_shape(self):
+    def test_ts2vec_mask_preserves_shape(self):
         x = torch.randn(4, 32, 8)
-        out = block_mask(x)
+        out = ts2vec_mask(x)
         self.assertEqual(out.shape, x.shape)
 
     def test_prepare_features_returns_correct_shapes(self):

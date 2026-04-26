@@ -112,12 +112,30 @@ impl TickProcessor {
             self.last_trend_direction = direction;
         }
 
-        let (dwt_a1, dwt_d1) = match self.last_price {
-            Some(prev) => {
-                let sqrt2 = 2.0f64.sqrt();
-                ((price + prev) / sqrt2, (price - prev) / sqrt2)
-            }
-            None => (0.0, 0.0),
+        let (dwt_a1, dwt_d1) = if self.len >= 4 {
+            let h = [
+                0.482962913144690,
+                0.836516303737469,
+                0.224143868041857,
+                -0.129409522550921,
+            ];
+            let g = [
+                -0.129409522550921,
+                -0.224143868041857,
+                0.836516303737469,
+                -0.482962913144690,
+            ];
+
+            let p0 = price;
+            let p1 = self.ring[(self.next_index + Self::CAPACITY - 1) % Self::CAPACITY].price;
+            let p2 = self.ring[(self.next_index + Self::CAPACITY - 2) % Self::CAPACITY].price;
+            let p3 = self.ring[(self.next_index + Self::CAPACITY - 3) % Self::CAPACITY].price;
+
+            let a1 = p0 * h[0] + p1 * h[1] + p2 * h[2] + p3 * h[3];
+            let d1 = p0 * g[0] + p1 * g[1] + p2 * g[2] + p3 * g[3];
+            (a1, d1)
+        } else {
+            (0.0, 0.0)
         };
 
         let snapshot_without_stats = TickSnapshot {

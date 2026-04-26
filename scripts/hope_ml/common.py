@@ -3,91 +3,80 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 import logging
-import contextlib
+import math
 
 __all__ = [
-    "CausalPadding1d",
-    "GatedTCNBlock",
-    "SEModule",
-    "GatedTCNV4",
+    "SimpleTransformerV2",
     "prepare_features",
     "contrastive_loss",
     "focal_loss",
-    "block_mask",
+    "ts2vec_mask",
 ]
 
-# --- Architecture: GatedTCN (Optimized for tract-onnx) ---
-
-class CausalPadding1d(nn.Module):
-    def __init__(self, padding):
-        super(CausalPadding1d, self).__init__()
-        self.padding = padding
-    def forward(self, x):
-        return nn.functional.pad(x, (self.padding, 0))
-
-class GatedTCNBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, dilation):
-        super(GatedTCNBlock, self).__init__()
-        padding = (kernel_size - 1) * dilation
-        self.pad = CausalPadding1d(padding)
-        self.conv_filter = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
-        self.conv_gate = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
-        self.proj = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
 
     def forward(self, x):
-        res = self.proj(x)
-        x_pad = self.pad(x)
-        f = torch.tanh(self.conv_filter(x_pad))
-        g = torch.sigmoid(self.conv_gate(x_pad))
-        return (f * g) + res
+        return x + self.pe[:, :x.size(1), :]
 
-class SEModule(nn.Module):
-    def __init__(self, channels, reduction=4):
-        super(SEModule, self).__init__()
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
-            nn.Sigmoid()
+class SimpleTransformerV2(nn.Module):
+    def __init__(self, input_dim=8, d_model=64, nhead=4, num_layers=2, max_seq_len=32):
+        super(SimpleTransformerV2, self).__init__()
+        self.input_proj = nn.Linear(input_dim, d_model)
+        
+        self.cls_token = nn.Parameter(torch.empty(1, 1, d_model))
+        nn.init.kaiming_normal_(self.cls_token, mode='fan_in', nonlinearity='relu')
+        
+        self.pos_encoder = PositionalEncoding(d_model, max_len=max_seq_len + 1)
+        
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, 
+            nhead=nhead, 
+            dim_feedforward=d_model * 4, 
+            batch_first=True,
+            norm_first=True
         )
-    def forward(self, x):
-        y = torch.mean(x, dim=2)
-        y = self.fc(y).view(y.size(0), y.size(1), 1)
-        return x * y
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        self.direction_head = nn.Sequential(nn.Linear(d_model, 1), nn.Sigmoid())
+        self.volatility_head = nn.Linear(d_model, 1)
 
-class GatedTCNV4(nn.Module):
-    def __init__(self, input_dim=8, hidden_dim=64, num_blocks=4):
-        super(GatedTCNV4, self).__init__()
-        self.input_proj = nn.Conv1d(input_dim, hidden_dim, 1)
-        self.blocks = nn.ModuleList([
-            GatedTCNBlock(hidden_dim, hidden_dim, kernel_size=3, dilation=2**i)
-            for i in range(num_blocks)
-        ])
-        self.se = SEModule(hidden_dim)
-        self.classifier = nn.Sequential(nn.Linear(hidden_dim, 1), nn.Sigmoid())
-        self.vol_head = nn.Linear(hidden_dim, 1)
+    def generate_causal_mask(self, sz, device):
+        mask = torch.triu(torch.ones(sz, sz, device=device) * float('-inf'), diagonal=1)
+        return mask
 
-    def forward(self, x, return_feat=False):
-        # x: (B, L, C) -> (B, C, L)
-        x = x.transpose(1, 2)
+    def forward(self, x, return_feat=False, apply_ts2vec_mask=False, mask_p=0.5):
+        B, L, _ = x.shape
         x = self.input_proj(x)
-        for block in self.blocks:
-            x = block(x)
-        x = self.se(x)
-        feat, _ = torch.max(x, dim=2)
+        
+        if apply_ts2vec_mask and self.training:
+            mask = torch.bernoulli(torch.full((B, L, 1), 1 - mask_p, device=x.device))
+            x = x * mask
 
-        if return_feat: return feat
-
-        return self.classifier(feat), self.vol_head(feat)
-
-# --- Feature Engineering: DWT Integration ---
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        
+        x = self.pos_encoder(x)
+        causal_mask = self.generate_causal_mask(L + 1, x.device)
+        
+        out = self.transformer_encoder(x, mask=causal_mask, is_causal=True)
+        feat = out[:, 0, :]
+        
+        if return_feat:
+            return feat
+            
+        return self.direction_head(feat), self.volatility_head(feat)
 
 def prepare_features(prices, seq_len=32):
-    if len(prices) <= seq_len + 1:
-        raise ValueError(
-            f"prepare_features requires at least {seq_len + 2} price samples "
-            f"(seq_len + 2), but got {len(prices)}."
-        )
+    if len(prices) <= seq_len + 3:
+        raise ValueError(f"prepare_features requires at least {seq_len + 4} price samples")
 
     returns = np.diff(prices)
     directions = np.sign(returns)
@@ -99,11 +88,21 @@ def prepare_features(prices, seq_len=32):
 
     norm_magnitudes = magnitudes / (vol + 1e-8)
 
-    p_curr = prices[1:]
-    p_prev = prices[:-1]
-    a1 = (p_curr + p_prev) / np.sqrt(2)
-    d1 = (p_curr - p_prev) / np.sqrt(2)
+    h = np.array([0.482962913144690, 0.836516303737469, 0.224143868041857, -0.129409522550921])
+    g = np.array([-0.129409522550921, -0.224143868041857, 0.836516303737469, -0.482962913144690])
+    
+    a1 = np.zeros(len(prices) - 1)
+    d1 = np.zeros(len(prices) - 1)
+    for i in range(len(prices) - 1):
+        if i >= 3:
+            p_window = np.array([prices[i+1], prices[i], prices[i-1], prices[i-2]])
+            a1[i] = np.dot(p_window, h)
+            d1[i] = np.dot(p_window, g)
+        else:
+            a1[i] = 0.0
+            d1[i] = 0.0
 
+    p_curr = prices[1:]
     a1_norm = a1 / (p_curr + 1e-8)
 
     streaks, reversals = [], []
@@ -141,11 +140,8 @@ def prepare_features(prices, seq_len=32):
     for col_idx, col_name in enumerate(["direction", "norm_magnitude", "norm_streak", "norm_reversal", "vol", "a1_norm", "d1", "vol_ratio"]):
         col = x_tensor[:, :, col_idx]
         logging.info(f"  feature[{col_idx}] {col_name}: mean={col.mean().item():.4f}, std={col.std().item():.4f}")
-    print(f"Class balance: {pos_ratio:.2f}% positive labels")
 
     return x_tensor, y_dir_tensor, y_vol_tensor
-
-# --- Training Utilities ---
 
 def contrastive_loss(feat1, feat2, temperature=0.1):
     batch_size = feat1.shape[0]
@@ -159,36 +155,16 @@ def contrastive_loss(feat1, feat2, temperature=0.1):
     loss2 = nn.functional.cross_entropy(logits.T, labels)
     return (loss1 + loss2) / 2.0
 
-def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
+def focal_loss(output, target, pos_weight=None, gamma=2.0, smoothing=0.05):
     target_smooth = target * (1 - smoothing) + 0.5 * smoothing
     bce_loss = nn.functional.binary_cross_entropy(output, target_smooth, reduction='none')
-    pt = torch.where(target == 1, output, 1 - output)
-    # Corrected: apply focal weight to smoothed targets consistently
     focal_pt = torch.where(target_smooth > 0.5, output, 1 - output)
-    weight = torch.where(target == 1, pos_weight, torch.ones_like(output))
+    if pos_weight is not None:
+        weight = torch.where(target == 1, pos_weight, torch.ones_like(output))
+    else:
+        weight = torch.ones_like(output)
     loss = weight * (1 - focal_pt) ** gamma * bce_loss
     return torch.mean(loss)
 
-def block_mask(x, mask_ratio=0.15, block_size=4, seed=None):
-    x = x.clone()
-    b, l, c = x.shape
-    num_blocks = l // block_size
-    if num_blocks == 0:
-        return x
-    num_masked_blocks = int(num_blocks * mask_ratio)
-
-    rng = np.random.RandomState(seed) if seed is not None else np.random
-
-    noise_mask = torch.ones(b, l, 1, dtype=torch.bool, device=x.device)
-    for i in range(b):
-        masked_indices = rng.choice(num_blocks, num_masked_blocks, replace=False)
-        for idx in masked_indices:
-            start_idx = idx * block_size
-            end_idx = (idx + 1) * block_size
-            x[i, start_idx : end_idx, :] = 0
-            noise_mask[i, start_idx : end_idx, :] = False
-
-    # Inject Gaussian noise to non-masked elements
-    noise = torch.randn_like(x) * 0.01
-    x = x + noise * noise_mask.float()
+def ts2vec_mask(x, mask_p=0.5):
     return x

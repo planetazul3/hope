@@ -18,7 +18,7 @@ def validate_data_streaming(chunk, last_states, expected_interval=1.0):
     # Check for duplicates within chunk
     dupes = chunk.duplicated(subset=['symbol', 'epoch']).sum()
     if dupes > 0:
-        print(f"WARNING: Found {dupes} duplicate symbol-epochs in chunk.")
+        logger.info(f"WARNING: Found {dupes} duplicate symbol-epochs in chunk.")
 
     # Check for gaps and duplicates against previous chunk state
     for symbol, group in chunk.groupby('symbol'):
@@ -26,7 +26,7 @@ def validate_data_streaming(chunk, last_states, expected_interval=1.0):
         
         # Check cross-chunk duplicate
         if prev_epoch is not None and not group.empty and group['epoch'].iloc[0] <= prev_epoch:
-             print(f"WARNING: [{symbol}] Found duplicate or out-of-order tick at epoch {group['epoch'].iloc[0]}")
+             logger.info(f"WARNING: [{symbol}] Found duplicate or out-of-order tick at epoch {group['epoch'].iloc[0]}")
 
         # Check gaps within current group
         epochs = group['epoch']
@@ -37,8 +37,8 @@ def validate_data_streaming(chunk, last_states, expected_interval=1.0):
         diffs = epochs.diff().dropna()
         gaps = diffs[diffs > expected_interval * 2.1] # Allow jitter (2.1s threshold as per standards)
         if not gaps.empty:
-            print(f"WARNING: [{symbol}] Found {len(gaps)} gaps > {expected_interval * 2.1}s.")
-            print(f"Max gap in chunk: {gaps.max():.2f}s")
+            logger.info(f"WARNING: [{symbol}] Found {len(gaps)} gaps > {expected_interval * 2.1}s.")
+            logger.info(f"Max gap in chunk: {gaps.max():.2f}s")
         
         last_states[symbol] = group['epoch'].iloc[-1]
 
@@ -75,7 +75,7 @@ def get_last_epoch_from_csv(csv_path):
                     parts = last_line.strip().split(',')
                     return float(parts[1]) if len(parts) >= 3 else float(parts[0])
     except Exception as e:
-        print(f"Warning: Could not read last epoch from CSV: {e}")
+        logger.info(f"Warning: Could not read last epoch from CSV: {e}")
         return None
     return None
 
@@ -84,18 +84,18 @@ def print_stats(df):
     Prints summary statistics of the exported ticks.
     """
     if df.empty: return
-    print("\n--- Tick Statistics ---")
-    print(df['quote'].describe())
+    logger.info("\n--- Tick Statistics ---")
+    logger.info(df['quote'].describe())
     
     # Simple text histogram
     try:
         import numpy as np
         counts, bins = np.histogram(df['quote'], bins=10)
         max_count = counts.max()
-        print("\nPrice Distribution Histogram:")
+        logger.info("\nPrice Distribution Histogram:")
         for i in range(len(counts)):
             bar = '#' * int(counts[i] / max_count * 20)
-            print(f"{bins[i]:10.2f} - {bins[i+1]:10.2f} | {bar} ({counts[i]})")
+            logger.info(f"{bins[i]:10.2f} - {bins[i+1]:10.2f} | {bar} ({counts[i]})")
     except ImportError:
         pass
 
@@ -104,7 +104,7 @@ def export_ticks(args):
     csv_path = args.csv
     
     if not os.path.exists(db_path):
-        print(f"Error: Database not found at {db_path}")
+        logger.info(f"Error: Database not found at {db_path}")
         sys.exit(1)
 
     # Determine compression
@@ -121,7 +121,7 @@ def export_ticks(args):
     if args.incremental:
         last_epoch = get_last_epoch_from_csv(csv_path)
         if last_epoch:
-            print(f"Incremental mode: Last epoch in CSV was {last_epoch}")
+            logger.info(f"Incremental mode: Last epoch in CSV was {last_epoch}")
             start_epoch = last_epoch
             is_incremental_active = True
             mode = 'a'
@@ -147,7 +147,7 @@ def export_ticks(args):
             conditions.append("symbol = ?")
             params.append(args.symbol)
         elif args.symbol:
-            print("Warning: Symbol column not found in database. Filtering by symbol will be ignored.")
+            logger.info("Warning: Symbol column not found in database. Filtering by symbol will be ignored.")
 
         if args.hours:
             start_time = datetime.now() - timedelta(hours=args.hours)
@@ -176,10 +176,10 @@ def export_ticks(args):
         
         total_rows = conn.execute(count_query, params).fetchone()[0]
         if total_rows == 0:
-            print("No new ticks found matching the criteria.")
+            logger.info("No new ticks found matching the criteria.")
             return
 
-        print(f"Exporting {total_rows:,} ticks...")
+        logger.info(f"Exporting {total_rows:,} ticks...")
 
         # Process in chunks
         chunk_iter = pd.read_sql_query(query, conn, params=params, chunksize=args.chunk_size)
@@ -198,7 +198,7 @@ def export_ticks(args):
                 try:
                     import fastparquet
                 except ImportError:
-                    print("Warning: Neither 'pyarrow' nor 'fastparquet' found. Parquet export will be disabled.")
+                    logger.info("Warning: Neither 'pyarrow' nor 'fastparquet' found. Parquet export will be disabled.")
                     use_parquet = False
 
         try:
@@ -234,8 +234,8 @@ def export_ticks(args):
                     
                     # Stats
                     if args.stats:
-                        print(f"\nChunk Stats:")
-                        print(chunk['quote'].describe())
+                        logger.info(f"\nChunk Stats:")
+                        logger.info(chunk['quote'].describe())
 
                     pbar.update(len(chunk))
                     first_chunk = False
@@ -244,11 +244,11 @@ def export_ticks(args):
                 parquet_writer.close()
 
         if use_parquet:
-            print(f"Successfully exported Parquet to {parquet_path}")
-        print(f"Successfully exported ticks to {csv_path}")
+            logger.info(f"Successfully exported Parquet to {parquet_path}")
+        logger.info(f"Successfully exported ticks to {csv_path}")
         
     except Exception as e:
-        print(f"Error during export: {e}")
+        logger.info(f"Error during export: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
