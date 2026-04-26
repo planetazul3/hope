@@ -70,7 +70,10 @@ fn main() -> Result<()> {
 
     let stake = config.stake;
     let payout_ratio = config.payout_ratio;
-    let mut history_buffer = [TickSnapshot::default(); 256];
+    let buf_size = config
+        .transformer_sequence_length
+        .max(hope::tick_processor::TickProcessor::CAPACITY);
+    let mut history_buffer = vec![TickSnapshot::default(); buf_size];
 
     for line in reader.lines() {
         let line = line?;
@@ -165,8 +168,14 @@ fn main() -> Result<()> {
                 }
             }
             TradingState::OrderPending => {
-                // Should not happen in backtest as we jump directly to InPosition
-                fsm.transition(TradingState::InPosition)?;
+                // This path means pending_execution_signal was None while in OrderPending state.
+                // This is a logic error; reset to Idle to prevent stale entry data from being used.
+                eprintln!(
+                    "Warning: OrderPending state with no pending signal at tick {}; resetting to Idle",
+                    total_ticks
+                );
+                fsm.transition(TradingState::Idle)?;
+                pending_execution_signal = None;
             }
             TradingState::Recovery => {
                 // Recovery is not expected in backtest as there is no network,

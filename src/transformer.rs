@@ -86,7 +86,7 @@ impl TransformerModel {
 
         self.data_buffer.clear();
 
-        for (i, tick) in sequence.iter().enumerate() {
+        for (_i, tick) in sequence.iter().enumerate() {
             // 1-5: Base features
             self.data_buffer.push(tick.direction.as_i8() as f32);
             self.data_buffer

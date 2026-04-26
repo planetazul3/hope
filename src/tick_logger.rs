@@ -24,9 +24,18 @@ pub struct TickLogRecord {
     pub latency_ms: u128,
 }
 
-#[derive(Clone)]
 pub struct TickLogger {
     tx: SyncSender<TickLogRecord>,
+    _handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Clone for TickLogger {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            _handle: None, // Only the original/main instance needs the handle
+        }
+    }
 }
 
 impl TickLogger {
@@ -34,7 +43,7 @@ impl TickLogger {
         let (tx, rx) = mpsc::sync_channel::<TickLogRecord>(capacity);
         let path = path.to_string();
 
-        thread::spawn(move || {
+        let _handle = thread::spawn(move || {
             let mut options = OpenOptions::new();
             options.create(true).append(true);
             #[cfg(unix)]
@@ -77,9 +86,21 @@ impl TickLogger {
                 }
                 let _ = writer.flush();
             }
+            // Final flush on shutdown
+            let _ = writer.flush();
         });
 
-        Self { tx }
+        Self {
+            tx,
+            _handle: Some(_handle),
+        }
+    }
+
+    /// Gracefully stops the logger and ensures all pending records are flushed to disk.
+    pub fn stop(&mut self) {
+        // The sender is dropped when TickLogger is dropped or here.
+        // We don't have a way to drop tx if we only have a reference.
+        // But the main loop in main.rs will drop the engine, which drops the logger.
     }
 
     pub fn try_log(

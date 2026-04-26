@@ -141,8 +141,8 @@ impl TickProcessor {
 
         // O(1) Incremental Stats Update
         if let Some(_) = self.last_price {
-            // Short-term window
-            if self.len > Self::VOLATILITY_WINDOW {
+            // Short-term window: subtract oldest return only if we have more returns than the window size
+            if self.len > Self::VOLATILITY_WINDOW + 1 {
                 let idx_out = (self.next_index + Self::CAPACITY - Self::VOLATILITY_WINDOW - 1)
                     % Self::CAPACITY;
                 let next_idx_out = (idx_out + 1) % Self::CAPACITY;
@@ -153,8 +153,8 @@ impl TickProcessor {
             self.sum_returns += current_return;
             self.sq_sum_returns += current_return.powi(2);
 
-            // Long-term window
-            if self.len > Self::LONG_VOLATILITY_WINDOW {
+            // Long-term window: subtract oldest return only if we have more returns than the window size
+            if self.len > Self::LONG_VOLATILITY_WINDOW + 1 {
                 let idx_out = (self.next_index + Self::CAPACITY - Self::LONG_VOLATILITY_WINDOW - 1)
                     % Self::CAPACITY;
                 let next_idx_out = (idx_out + 1) % Self::CAPACITY;
@@ -194,7 +194,7 @@ impl TickProcessor {
             return (0.0, 0.0, a1, d1);
         }
 
-        let n = (count - 1) as f64;
+        let n = count as f64;
         let mean = self.sum_returns / n;
         let variance = (self.sq_sum_returns / n) - mean.powi(2);
         let std_dev = variance.max(0.0).sqrt();
@@ -208,7 +208,7 @@ impl TickProcessor {
             return 0.0;
         }
 
-        let n = (count - 1) as f64;
+        let n = count as f64;
         let mean = self.long_sum_returns / n;
         let variance = (self.long_sq_sum_returns / n) - mean.powi(2);
         variance.max(0.0).sqrt()
@@ -287,5 +287,17 @@ mod tests {
         // 6. Trend continues (Down)
         let s6 = processor.push(6, 101.0);
         assert_eq!(s6.ticks_since_reversal, 2);
+    }
+
+    #[test]
+    fn drift_equals_population_mean() {
+        let mut proc = TickProcessor::new();
+        // Push 11 prices to fill window (10 returns)
+        for i in 0..11 {
+            proc.push(i as u64, 100.0 + i as f64);
+        }
+        let snap = proc.push(11, 111.0);
+        let expected_drift = 1.0_f64; // all returns are 1.0
+        assert!((snap.drift - expected_drift).abs() < 1e-9);
     }
 }

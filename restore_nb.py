@@ -313,7 +313,7 @@ export_src = [
     "try:\n",
     "    from onnxruntime.quantization import quantize_dynamic, QuantType\n",
     "    quant_path = \"model_quantized.onnx\"\n",
-    "    quantize_dynamic(\"model.onnx\", quant_path, weight_type=QuantType.QUInt8)\n",
+    "    quantize_dynamic(\"model.onnx\", quant_path, weight_type=QuantType.QInt8)\n",
     "    print(f\"Dynamic INT8 Quantization Successful: {quant_path}\")\n",
     "except Exception as e:\n",
     "    quantization_succeeded = False\n",

@@ -59,7 +59,7 @@ class TickStore:
             CREATE TABLE IF NOT EXISTS ticks (
                 id     INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT    NOT NULL,
-                epoch  REAL    NOT NULL,
+                epoch  INTEGER NOT NULL,
                 quote  REAL    NOT NULL,
                 UNIQUE(symbol, epoch)
             )
@@ -86,7 +86,9 @@ class TickStore:
                 valid,
             )
             self.conn.commit()
-            return cursor.rowcount
+            # Use SQLite's changes() for accurate insert count
+            inserted = self.conn.execute("SELECT changes()").fetchone()[0]
+            return inserted
         except sqlite3.Error as e:
             logger.error(f"Database error: {e}")
             self.conn.rollback()

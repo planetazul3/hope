@@ -2,6 +2,10 @@ use crate::{
     fsm::TradingState,
     tick_processor::{Direction, TickSnapshot},
 };
+use once_cell::sync::Lazy;
+use statrs::distribution::{ContinuousCDF, Normal};
+
+static STD_NORMAL: Lazy<Normal> = Lazy::new(|| Normal::new(0.0, 1.0).expect("valid params"));
 
 pub trait ProbabilityModel {
     fn probability_up(&mut self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
@@ -16,8 +20,6 @@ pub struct GaussianModel {
 
 impl ProbabilityModel for GaussianModel {
     fn probability_up(&mut self, tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
-        use statrs::distribution::{ContinuousCDF, Normal};
-
         if tick.volatility <= 0.0 {
             return 0.5;
         }
@@ -28,12 +30,10 @@ impl ProbabilityModel for GaussianModel {
             return 0.5;
         }
 
-        // Use dampened volatility to avoid numerical instability
         let t_sqrt = (self.duration_ticks as f64).sqrt();
         let x = (tick.drift * t_sqrt) / (tick.volatility + VOLATILITY_EPSILON);
 
-        let n = Normal::new(0.0, 1.0).unwrap();
-        n.cdf(x)
+        STD_NORMAL.cdf(x)
     }
 }
 
@@ -149,8 +149,10 @@ where
             adjusted_threshold += self.volatility_penalty;
         }
 
-        // Clamp to ensure it doesn't fall below floor
-        adjusted_threshold = adjusted_threshold.max(self.threshold - self.momentum_reward);
+        // Clamp to ensure it doesn't fall below floor (never below 0.5)
+        adjusted_threshold = adjusted_threshold
+            .max(0.5_f64)
+            .max(self.threshold - self.momentum_reward);
 
         // General trend is positive if probability_up > 0.5 (driven by positive drift)
         // General trend is negative if probability_down > 0.5 (driven by negative drift)

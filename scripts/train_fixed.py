@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from hope_ml.common import GatedTCNV4, prepare_features, contrastive_loss, focal_loss, block_mask
 from sklearn.metrics import precision_recall_curve, auc as pr_auc
 import random as _random
+import contextlib
 
 # ── Reproducibility (Stage 11 requirement) ──────────────────────────────
 _SEED = 42
@@ -122,7 +123,8 @@ def main():
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     
     # Mixed Precision Setup
-    scaler = torch.cuda.amp.GradScaler()
+    use_amp = device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda') if use_amp else None
     
     # Calculate class imbalance for Focal Loss
     num_pos = torch.sum(y_dir_all[:split]).item()
@@ -146,19 +148,22 @@ def main():
             bx, by_dir, by_vol = bx.to(device), by_dir.to(device), by_vol.to(device)
             optimizer.zero_grad()
             
-            with torch.cuda.amp.autocast():
+            with (torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()):
                 out_dir, out_vol = model(bx)
                 l_dir = focal_loss(out_dir, by_dir, pos_weight_t)
                 l_vol = nn.functional.mse_loss(out_vol, by_vol)
                 loss = l_dir + 0.2 * l_vol
             
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            total_grad_norm += grad_norm.item()
-            num_batches += 1
-            scaler.step(optimizer)
-            scaler.update()
+            if scaler:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                optimizer.step()
 
         model.eval()
         v_probs, v_targets = [], []

@@ -35,6 +35,9 @@ pub async fn run(config: AppConfig) -> Result<()> {
     let (command_tx, command_rx) =
         mpsc::channel::<WebSocketCommand>(config.outbound_queue_capacity);
 
+    // Globally unique request ID counter, shared between the Engine and the WebSocket client.
+    // This atomicity ensures that concurrent subscriptions (from the client) and trade
+    // requests (from the engine) never share an ID, preventing routing collisions.
     let req_id_counter = Arc::new(AtomicU32::new(100));
     let tracked_contracts = Arc::new(RwLock::new(BTreeSet::new()));
 
@@ -79,7 +82,7 @@ struct Engine {
     pending_probability: Option<f64>,
     req_id_counter: Arc<AtomicU32>,
     history_buffer: Vec<TickSnapshot>,
-    balance: f64,
+    balance: Option<f64>,
     buffered_close_event: Option<(u64, f64)>,
     tracked_contracts: Arc<RwLock<BTreeSet<u64>>>,
 }
@@ -146,10 +149,12 @@ impl Engine {
             req_id_counter,
             history_buffer: vec![
                 TickSnapshot::default();
-                config.transformer_sequence_length.max(64)
+                config
+                    .transformer_sequence_length
+                    .max(crate::tick_processor::TickProcessor::CAPACITY)
             ],
             config,
-            balance: 0.0,
+            balance: None,
             buffered_close_event: None,
             tracked_contracts,
         }
@@ -374,7 +379,7 @@ impl Engine {
                     balance,
                     ..
                 } => {
-                    self.balance = balance;
+                    self.balance = Some(balance);
                     info!(%login_id, %currency, balance = %format!("{:.2}", balance), "authorized websocket session");
                 }
                 TradeUpdate::Proposal {
@@ -557,28 +562,35 @@ impl Engine {
         profit: f64,
         _command_tx: &mpsc::Sender<WebSocketCommand>,
     ) -> Result<()> {
-        let old_balance = self.balance;
-        self.balance += profit;
         let outcome = self.risk.on_trade_closed(profit);
 
-        let win_rate = if outcome.total_trades > 0 {
-            (outcome.wins as f64 / outcome.total_trades as f64) * 100.0
-        } else {
-            0.0
-        };
+        if let Some(ref mut bal) = self.balance {
+            let old_balance = *bal;
+            *bal += profit;
+            let win_rate = if outcome.total_trades > 0 {
+                (outcome.wins as f64 / outcome.total_trades as f64) * 100.0
+            } else {
+                0.0
+            };
 
-        info!(
-            contract_id,
-            profit = %format!("{:.2}", profit),
-            old_balance = %format!("{:.2}", old_balance),
-            new_balance = %format!("{:.2}", self.balance),
-            total_trades = %outcome.total_trades,
-            wins = %outcome.wins,
-            losses = %outcome.losses,
-            win_rate = %format!("{:.2}%", win_rate),
-            session_profit = %format!("{:.2}", outcome.total_profit),
-            "contract closed"
-        );
+            info!(
+                contract_id,
+                profit = %format!("{:.2}", profit),
+                old_balance = %format!("{:.2}", old_balance),
+                new_balance = %format!("{:.2}", *bal),
+                total_trades = %outcome.total_trades,
+                wins = %outcome.wins,
+                losses = %outcome.losses,
+                win_rate = %format!("{:.2}%", win_rate),
+                session_profit = %format!("{:.2}", outcome.total_profit),
+                "contract closed"
+            );
+        } else {
+            warn!(
+                contract_id,
+                profit, "contract closed but balance not yet initialized"
+            );
+        }
 
         self.active_contract_id = None;
         self.contract_started_at = None;
@@ -587,13 +599,11 @@ impl Engine {
 
         if outcome.enter_cooldown {
             self.cooldown_remaining = self.config.cooldown_ticks;
-            if self.fsm.state() == TradingState::InPosition
-                || self.fsm.state() == TradingState::OrderPending
-            {
-                self.fsm.transition(TradingState::Cooldown)?;
-            } else {
-                self.safe_reset();
-                self.fsm.transition(TradingState::Cooldown)?;
+            if self.fsm.state() != TradingState::Cooldown {
+                if self.fsm.transition(TradingState::Cooldown).is_err() {
+                    self.fsm.reset_to_idle();
+                    self.fsm.transition(TradingState::Cooldown)?;
+                }
             }
             warn!(
                 consecutive_losses = outcome.consecutive_losses,

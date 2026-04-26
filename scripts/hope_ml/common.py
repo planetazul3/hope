@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 import logging
+import contextlib
 
 __all__ = [
     "CausalPadding1d",
@@ -162,8 +163,10 @@ def focal_loss(output, target, pos_weight, gamma=2.0, smoothing=0.05):
     target_smooth = target * (1 - smoothing) + 0.5 * smoothing
     bce_loss = nn.functional.binary_cross_entropy(output, target_smooth, reduction='none')
     pt = torch.where(target == 1, output, 1 - output)
+    # Corrected: apply focal weight to smoothed targets consistently
+    focal_pt = torch.where(target_smooth > 0.5, output, 1 - output)
     weight = torch.where(target == 1, pos_weight, torch.ones_like(output))
-    loss = weight * (1 - pt) ** gamma * bce_loss
+    loss = weight * (1 - focal_pt) ** gamma * bce_loss
     return torch.mean(loss)
 
 def block_mask(x, mask_ratio=0.15, block_size=4, seed=None):
