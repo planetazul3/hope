@@ -7,28 +7,45 @@ import gzip
 from tqdm import tqdm
 from datetime import datetime, timedelta
 
-def validate_data(df, expected_interval=1.0):
+def validate_data_streaming(chunk, last_states, expected_interval=1.0):
     """
-    Checks for gaps and duplicates in the tick data.
+    Checks for gaps and duplicates in the tick data across chunks.
+    last_states: Dict[symbol, float] - storing the last epoch of each symbol.
     """
-    if len(df) < 2:
+    if chunk.empty:
         return
-    
-    # Check for duplicates
-    dupes = df.duplicated(subset=['epoch']).sum()
-    if dupes > 0:
-        print(f"WARNING: Found {dupes} duplicate epochs.")
 
-    # Check for gaps
-    diffs = df['epoch'].diff().dropna()
-    gaps = diffs[diffs > expected_interval * 2] # Allow some jitter
-    if not gaps.empty:
-        print(f"WARNING: Found {len(gaps)} gaps larger than {expected_interval * 2}s.")
-        print(f"Max gap: {gaps.max():.2f}s")
+    # Check for duplicates within chunk
+    dupes = chunk.duplicated(subset=['symbol', 'epoch']).sum()
+    if dupes > 0:
+        print(f"WARNING: Found {dupes} duplicate symbol-epochs in chunk.")
+
+    # Check for gaps and duplicates against previous chunk state
+    for symbol, group in chunk.groupby('symbol'):
+        prev_epoch = last_states.get(symbol)
+        
+        # Check cross-chunk duplicate
+        if prev_epoch is not None and not group.empty and group['epoch'].iloc[0] <= prev_epoch:
+             print(f"WARNING: [{symbol}] Found duplicate or out-of-order tick at epoch {group['epoch'].iloc[0]}")
+
+        # Check gaps within current group
+        epochs = group['epoch']
+        if prev_epoch is not None:
+            # Prepend last epoch to check gap at chunk seam
+            epochs = pd.concat([pd.Series([prev_epoch]), epochs])
+        
+        diffs = epochs.diff().dropna()
+        gaps = diffs[diffs > expected_interval * 2.1] # Allow jitter (2.1s threshold as per standards)
+        if not gaps.empty:
+            print(f"WARNING: [{symbol}] Found {len(gaps)} gaps > {expected_interval * 2.1}s.")
+            print(f"Max gap in chunk: {gaps.max():.2f}s")
+        
+        last_states[symbol] = group['epoch'].iloc[-1]
 
 def get_last_epoch_from_csv(csv_path):
     """
     Reads the last line of a CSV (support Gzip) to find the last exported epoch.
+    Expects 3 columns: symbol, epoch, quote
     """
     if not os.path.exists(csv_path):
         return None
@@ -46,14 +63,17 @@ def get_last_epoch_from_csv(csv_path):
                 if not last_line and len(lines) > 1:
                     last_line = lines[-2].decode().strip()
                 if not last_line: return None
-                return float(last_line.split(',')[0])
+                parts = last_line.split(',')
+                # Handle both 2-column (epoch,quote) and 3-column (symbol,epoch,quote)
+                return float(parts[1]) if len(parts) >= 3 else float(parts[0])
         else:
             with gzip.open(csv_path, 'rt') as f:
                 last_line = None
                 for line in f:
                     last_line = line
                 if last_line:
-                    return float(last_line.strip().split(',')[0])
+                    parts = last_line.strip().split(',')
+                    return float(parts[1]) if len(parts) >= 3 else float(parts[0])
     except Exception as e:
         print(f"Warning: Could not read last epoch from CSV: {e}")
         return None
@@ -97,68 +117,64 @@ def export_ticks(args):
     # Handle Incremental
     start_epoch = args.start
     mode = 'w'
+    is_incremental_active = False
     if args.incremental:
         last_epoch = get_last_epoch_from_csv(csv_path)
         if last_epoch:
             print(f"Incremental mode: Last epoch in CSV was {last_epoch}")
-            start_epoch = last_epoch + 0.0001 # Small epsilon
+            start_epoch = last_epoch
+            is_incremental_active = True
             mode = 'a'
-
-    # Build Query
-    query = "SELECT epoch, quote FROM ticks"
-    conditions = []
-    params = []
-
-    # Symbol filter (new)
-    if args.symbol:
-        conditions.append("symbol = ?")
-        params.append(args.symbol)
-
-    if args.hours:
-        start_time = datetime.now() - timedelta(hours=args.hours)
-        conditions.append("epoch >= ?")
-        params.append(start_time.timestamp())
-    elif start_epoch:
-        conditions.append("epoch >= ?")
-        params.append(start_epoch)
-    
-    if args.end:
-        conditions.append("epoch <= ?")
-        params.append(args.end)
-
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
-    
-    query += " ORDER BY epoch ASC"
 
     try:
         conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
         
-        # Check if symbol column exists to support legacy DBs during transition
+        # Check schema
         cursor = conn.execute("PRAGMA table_info(ticks)")
         columns = [row[1] for row in cursor.fetchall()]
-        if "symbol" not in columns and args.symbol:
+        has_symbol = "symbol" in columns
+
+        # Build Query
+        select_cols = "symbol, epoch, quote" if has_symbol else "epoch, quote"
+        query = f"SELECT {select_cols} FROM ticks"
+        
+        conditions = []
+        params = []
+
+        if args.symbol and has_symbol:
+            conditions.append("symbol = ?")
+            params.append(args.symbol)
+        elif args.symbol:
             print("Warning: Symbol column not found in database. Filtering by symbol will be ignored.")
-            query = query.replace("symbol = ? AND ", "").replace("WHERE symbol = ?", "")
-            if args.symbol in params:
-                params.remove(args.symbol)
+
+        if args.hours:
+            start_time = datetime.now() - timedelta(hours=args.hours)
+            conditions.append("epoch >= ?")
+            params.append(start_time.timestamp())
+        elif is_incremental_active:
+            conditions.append("epoch > ?")
+            params.append(start_epoch)
+        elif start_epoch:
+            conditions.append("epoch >= ?")
+            params.append(start_epoch)
+        
+        if args.end:
+            conditions.append("epoch <= ?")
+            params.append(args.end)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        
+        query += " ORDER BY epoch ASC"
 
         # Get total count for progress bar
-        count_query = "SELECT COUNT(*) FROM ticks"
+        count_query = f"SELECT COUNT(*) FROM ticks"
         if conditions:
-            # Re-verify if symbol filter was removed
-            final_conditions = []
-            final_params = []
-            for c, p in zip(conditions, params):
-                if "symbol" in c and "symbol" not in columns: continue
-                final_conditions.append(c)
-                final_params.append(p)
-            if final_conditions:
-                count_query += " WHERE " + " AND ".join(final_conditions)
-        else:
-            final_params = []
+            count_query += " WHERE " + " AND ".join(conditions)
         
-        total_rows = conn.execute(count_query, final_params).fetchone()[0]
+        total_rows = conn.execute(count_query, params).fetchone()[0]
         if total_rows == 0:
             print("No new ticks found matching the criteria.")
             return
@@ -169,42 +185,58 @@ def export_ticks(args):
         chunk_iter = pd.read_sql_query(query, conn, params=params, chunksize=args.chunk_size)
         
         first_chunk = True
-        all_chunks = [] if (args.validate or args.parquet or args.stats) else None
+        last_states = {} # For streaming validation
+        
+        # Parquet handling
+        parquet_path = csv_path.replace('.csv', '').replace('.gz', '') + '.parquet'
+        use_parquet = args.parquet
+        if use_parquet:
+            try:
+                import pyarrow
+            except ImportError:
+                try:
+                    import fastparquet
+                except ImportError:
+                    print("Warning: Neither 'pyarrow' nor 'fastparquet' found. Parquet export will be disabled.")
+                    use_parquet = False
 
         with tqdm(total=total_rows, desc="Exporting", unit="ticks") as pbar:
             for chunk in chunk_iter:
                 # CSV Export
-                header = False # Maintain compatibility
+                header = False 
                 current_mode = mode if first_chunk else 'a'
                 chunk.to_csv(csv_path, index=False, header=header, mode=current_mode, compression=compression)
                 
-                if all_chunks is not None:
-                    all_chunks.append(chunk)
+                # Incremental Parquet Export (Append)
+                if use_parquet:
+                    try:
+                        # fastparquet supports append; pyarrow requires reading/writing or partitioned files
+                        # We'll use a simpler 'concatenate and write' if file is small, 
+                        # but for hardening we should try to append.
+                        chunk.to_parquet(parquet_path, index=False, engine='fastparquet', append=os.path.exists(parquet_path))
+                    except (ImportError, TypeError):
+                        # Fallback for pyarrow or if fastparquet fails
+                        if first_chunk and mode == 'w':
+                             chunk.to_parquet(parquet_path, index=False)
+                        else:
+                             # This is inefficient but safe for pyarrow incremental
+                             existing = pd.read_parquet(parquet_path)
+                             pd.concat([existing, chunk]).to_parquet(parquet_path, index=False)
+
+                # Streaming Validation
+                if args.validate:
+                    validate_data_streaming(chunk, last_states)
                 
+                # Stats (Incremental accumulation could be added here, for now we print per chunk if --stats)
+                if args.stats:
+                    print(f"\nChunk Stats:")
+                    print(chunk['quote'].describe())
+
                 pbar.update(len(chunk))
                 first_chunk = False
 
-        full_df = None
-        if all_chunks:
-            full_df = pd.concat(all_chunks)
-        elif (args.parquet or args.validate or args.stats):
-            full_df = pd.read_csv(csv_path, header=None, names=['epoch', 'quote'], compression=compression)
-
-        if args.parquet and full_df is not None:
-            try:
-                parquet_path = csv_path.replace('.csv', '').replace('.gz', '') + '.parquet'
-                full_df.to_parquet(parquet_path, index=False)
-                print(f"Exported to {parquet_path}")
-            except ImportError:
-                print("Error: 'pyarrow' or 'fastparquet' is required for Parquet export.")
-
-        if args.validate and full_df is not None:
-            print("Validating data integrity...")
-            validate_data(full_df)
-
-        if args.stats and full_df is not None:
-            print_stats(full_df)
-
+        if use_parquet:
+            print(f"Successfully exported Parquet to {parquet_path}")
         print(f"Successfully exported ticks to {csv_path}")
         
     except Exception as e:
