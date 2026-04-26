@@ -1,365 +1,108 @@
 import json
 import os
 
-nb_path = "notebooks/train_transformer.ipynb"
-with open(nb_path, "r") as f:
-    nb = json.load(f)
+def make_notebook(title, cells, env='colab'):
+    nb = {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {
+                "display_name": "Python 3",
+                "language": "python",
+                "name": "python3"
+            },
+            "language_info": {
+                "name": "python"
+            }
+        },
+        "nbformat": 4,
+        "nbformat_minor": 0
+    }
+    if env == 'colab':
+        nb["metadata"]["colab"] = {"provenance": []}
+    return nb
 
-new_cells = []
+def make_markdown_cell(content):
+    return {
+        "cell_type": "markdown",
+        "metadata": {},
+        "source": content if isinstance(content, list) else [content]
+    }
 
-# Cell 1: Environment Detection — cloud-only enforcement, no local fallback
-env_detection_src = [
-    "# Environment Detection and Path Setup\n",
-    "import os\n",
-    "import sys\n",
-    "\n",
-    "env = None\n",
-    "try:\n",
-    "    import google.colab\n",
-    "    env = 'colab'\n",
-    "    data_path = \"/content/ticks.csv\"\n",
-    "    if '/content/scripts' not in sys.path: sys.path.append('/content/scripts')\n",
-    "    from google.colab import drive\n",
-    "    try:\n",
-    "        drive.mount('/content/drive', force_remount=False)\n",
-    "    except Exception as _e:\n",
-    "        print(f\"WARNING: Google Drive not mounted; persistent checkpointing will be disabled. ({_e})\")\n",
-    "except ImportError:\n",
-    "    pass\n",
-    "\n",
-    "if env is None:\n",
-    "    if 'KAGGLE_URL_BASE' in os.environ:\n",
-    "        env = 'kaggle'\n",
-    "        data_path = \"/kaggle/input/ticks-csv/ticks.csv\"\n",
-    "        if '/kaggle/working/scripts' not in sys.path: sys.path.append('/kaggle/working/scripts')\n",
-    "    else:\n",
-    "        raise RuntimeError(\n",
-    "            \"Local training execution is prohibited. \"\n",
-    "            \"This notebook must be run exclusively on Google Colab or Kaggle. \"\n",
-    "            \"Upload data/ticks.csv to your cloud environment and re-run from there.\"\n",
-    "        )\n",
-    "\n",
-    "print(f\"Running on: {env}\")\n",
-    "print(f\"Data path: {data_path}\")\n"
+def make_code_cell(content):
+    return {
+        "cell_type": "code",
+        "execution_count": None,
+        "metadata": {},
+        "outputs": [],
+        "source": content if isinstance(content, list) else [content]
+    }
+
+# --- Colab Notebook ---
+colab_cells = [
+    make_markdown_cell([
+        "# Hope ML: Cloud Training Pipeline (Colab)\n",
+        "\n",
+        "This notebook trains the Canonical Causal Transformer model with TS2Vec pre-training and exports the ONNX artifact.\n",
+        "Requires `ticks.csv` to be uploaded or mounted from Google Drive."
+    ]),
+    make_code_cell([
+        "from google.colab import drive\n",
+        "import os\n",
+        "\n",
+        "# 1. Mount Drive\n",
+        "drive.mount('/content/drive')\n",
+        "\n",
+        "# 2. Install Dependencies\n",
+        "!pip install torch==2.11.0 pandas==3.0.2 numpy==2.4.4 scikit-learn==1.8.0 tqdm==4.67.3 cryptography==42.0.5 onnx==1.21.0 onnxruntime==1.20.1\n",
+        "\n",
+        "# 3. Set up Path and Run Training\n",
+        "import sys\n",
+        "sys.path.append('/content/drive/MyDrive/hope/scripts')\n",
+        "\n",
+        "import train_fixed\n",
+        "train_fixed.main()\n"
+    ])
 ]
 
-# Cell 2: Dependencies
-pip_install_src = [
-    "!pip install torch==2.11.0 onnx==1.21.0 numpy==2.4.4 pandas==3.0.2 scikit-learn==1.8.0 tqdm==4.67.3 matplotlib==3.7.0 seaborn==0.12.2 onnxruntime==1.20.1\n"
+# --- Kaggle Notebook ---
+kaggle_cells = [
+    make_markdown_cell([
+        "# Hope ML: Cloud Training Pipeline (Kaggle)\n",
+        "\n",
+        "This notebook trains the Canonical Causal Transformer model with TS2Vec pre-training and exports the ONNX artifact.\n",
+        "Requires `ticks.csv` as an input dataset."
+    ]),
+    make_code_cell([
+        "# 1. Install Dependencies\n",
+        "!pip install torch==2.11.0 pandas==3.0.2 numpy==2.4.4 scikit-learn==1.8.0 tqdm==4.67.3 cryptography==42.0.5 onnx==1.21.0 onnxruntime==1.20.1\n",
+        "\n",
+        "# 2. Set up Path and Run Training\n",
+        "import sys\n",
+        "import os\n",
+        "\n",
+        "# Adjust path if necessary depending on dataset upload location\n",
+        "sys.path.append('/kaggle/working/hope/scripts')\n",
+        "\n",
+        "import train_fixed\n",
+        "train_fixed.main()\n"
+    ])
 ]
 
-# Cell 3: Imports
-imports_src = [
-    "import torch\n",
-    "import torch.nn as nn\n",
-    "import torch.onnx\n",
-    "import numpy as np\n",
-    "import pandas as pd\n",
-    "import math\n",
-    "import os\n",
-    "import copy\n",
-    "import shutil\n",
-    "from sklearn.metrics import roc_auc_score, accuracy_score, precision_score, recall_score, f1_score\n",
-    "from torch.utils.data import DataLoader, TensorDataset\n",
-    "try:\n",
-    "    from hope_ml.common import GatedTCNBlock, SEModule, GatedTCNV4, prepare_features, contrastive_loss, focal_loss, block_mask, CausalPadding1d\n",
-    "    print(\"Successfully imported hope_ml.common\")\n",
-    "except ImportError as e:\n",
-    "    print(f\"Import failed: {e}. Make sure the scripts/hope_ml directory is available.\")\n"
-]
-
-# Cell 4: Reproducibility seed (Task 23)
-seed_src = [
-    "import random\n",
-    "SEED = 42\n",
-    "torch.manual_seed(SEED)\n",
-    "torch.cuda.manual_seed_all(SEED)\n",
-    "np.random.seed(SEED)\n",
-    "random.seed(SEED)\n",
-    "torch.backends.cudnn.deterministic = True\n",
-    "torch.backends.cudnn.benchmark = False\n",
-    "print(f\"Global random seed set to {SEED}\")\n"
-]
-
-# Cell 5: Data Loading
-data_loading_src = [
-    "def load_data_from_csv(csv_path, limit=None):\n",
-    "    search_paths = [csv_path, \"data/ticks.csv\", \"/content/ticks.csv\", \"/kaggle/input/ticks-csv/ticks.csv\"]\n",
-    "    actual_path = None\n",
-    "    for p in search_paths:\n",
-    "        if os.path.exists(p):\n",
-    "            actual_path = p\n",
-    "            break\n",
-    "    \n",
-    "    if actual_path is None:\n",
-    "        print(\"CSV not found in common paths.\")\n",
-    "        return None\n",
-    "    \n",
-    "    print(f\"Loading data from: {actual_path}\")\n",
-    "    df = pd.read_csv(actual_path, header=None, nrows=limit if limit is not None else None)\n",
-    "    # Support 2-col (epoch, quote) and 3-col (symbol, epoch, quote)\n",
-    "    if df.shape[1] >= 3: prices = df.iloc[:, 2].values\n",
-    "    else: prices = df.iloc[:, 1].values\n",
-    "    return prices.astype(np.float32)\n"
-]
-
-# Cell 6: Main Training Loop (Tasks 26, 33)
-training_src = [
-    "csv_path = data_path\n",
-    "seq_len = 32\n",
-    "input_dim = 8\n",
-    "\n",
-    "prices = load_data_from_csv(csv_path)\n",
-    "if prices is not None:\n",
-    "    x_all, y_dir_all, y_vol_all = prepare_features(prices, seq_len=seq_len)\n",
-    "else:\n",
-    "    print(\"Using synthetic data.\")\n",
-    "    x_all = torch.randn(2000, seq_len, input_dim)\n",
-    "    y_dir_all = torch.randint(0, 2, (2000, 1)).float()\n",
-    "    y_vol_all = torch.rand(2000, 1)\n",
-    "\n",
-    "# The 80/20 train/validation split is temporal and intentional. Shuffling is deliberately\n",
-    "# omitted to prevent data leakage. The validation set always represents the most recent\n",
-    "# 20 percent of ticks.\n",
-    "split = int(len(x_all) * 0.8)\n",
-    "train_ds = TensorDataset(x_all[:split], y_dir_all[:split], y_vol_all[:split])\n",
-    "val_ds = TensorDataset(x_all[split:], y_dir_all[split:], y_vol_all[split:])\n",
-    "train_loader = DataLoader(train_ds, batch_size=128, shuffle=True, num_workers=2, pin_memory=True)\n",
-    "val_loader = DataLoader(val_ds, batch_size=128, shuffle=False, num_workers=2, pin_memory=True)\n",
-    "\n",
-    "device = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
-    "model = GatedTCNV4(input_dim=input_dim).to(device)\n",
-    "total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)\n",
-    "print(f\"Total trainable parameters: {total_params:,}\")\n",
-    "optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)\n",
-    "\n",
-    "# Phase 1: Contrastive Pre-training\n",
-    "print(f\"Starting Phase 1: Contrastive Pre-training... (Initial LR: {optimizer.param_groups[0]['lr']:.6f})\")\n",
-    "contrastive_epochs = 5\n",
-    "for epoch in range(contrastive_epochs):\n",
-    "    model.train()\n",
-    "    total_cl_loss = 0\n",
-    "    for bx, _, _ in train_loader:\n",
-    "        bx = bx.to(device)\n",
-    "        bx_aug1 = block_mask(bx)\n",
-    "        bx_aug2 = block_mask(bx)\n",
-    "        optimizer.zero_grad()\n",
-    "        f1 = model(bx_aug1, return_feat=True)\n",
-    "        f2 = model(bx_aug2, return_feat=True)\n",
-    "        loss = contrastive_loss(f1, f2, temperature=0.1)\n",
-    "        loss.backward()\n",
-    "        optimizer.step()\n",
-    "        total_cl_loss += loss.item()\n",
-    "    print(f\"Pre-train Epoch {epoch}, CL Loss: {total_cl_loss/len(train_loader):.4f}\")\n",
-    "\n",
-    "# Phase 2: Supervised Fine-tuning\n",
-    "focal_gamma = 2.0\n",
-    "focal_smoothing = 0.05\n",
-    "print(f\"Starting Phase 2: Supervised Fine-tuning (Gamma: {focal_gamma}, Smoothing: {focal_smoothing})...\")\n",
-    "num_pos = torch.sum(y_dir_all[:split]).item()\n",
-    "if num_pos == 0:\n",
-    "    print(\"WARNING: No positive labels found in training split. Setting pos_weight to 1.0.\")\n",
-    "    pos_weight = 1.0\n",
-    "else:\n",
-    "    pos_weight = (split - num_pos) / num_pos\n",
-    "    \n",
-    "from torch.optim.lr_scheduler import LambdaLR\n",
-    "warmup_epochs = 5\n",
-    "def lr_lambda(epoch): return (epoch + 1) / warmup_epochs if epoch < warmup_epochs else 1.0\n",
-    "warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)\n",
-    "plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)\n",
-    "\n",
-    "early_stop_patience = 5\n",
-    "patience_counter = 0  # Task 33: Initialize before loop to avoid NameError\n",
-    "best_auc = 0.0\n",
-    "best_model = copy.deepcopy(model.state_dict())\n",
-    "\n",
-    "for epoch in range(20):\n",
-    "    model.train()\n",
-    "    total_grad_norm = 0\n",
-    "    num_batches = 0\n",
-    "    for bx, by_dir, by_vol in train_loader:\n",
-    "        bx, by_dir, by_vol = bx.to(device), by_dir.to(device), by_vol.to(device)\n",
-    "        optimizer.zero_grad()\n",
-    "        out_dir, out_vol = model(bx)\n",
-    "        l_dir = focal_loss(out_dir, by_dir, torch.tensor(pos_weight).to(device), gamma=focal_gamma, smoothing=focal_smoothing)\n",
-    "        l_vol = nn.functional.mse_loss(out_vol, by_vol)\n",
-    "        loss = l_dir + 0.2 * l_vol\n",
-    "        loss.backward()\n",
-    "        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)\n",
-    "        total_grad_norm += grad_norm.item()\n",
-    "        num_batches += 1\n",
-    "        optimizer.step()\n",
-    "\n",
-    "    model.eval()\n",
-    "    vp, vt = [], []\n",
-    "    with torch.no_grad():\n",
-    "        for bx, by_dir, _ in val_loader:\n",
-    "            out_dir, _ = model(bx.to(device))\n",
-    "            vp.extend(out_dir.cpu().numpy().flatten())\n",
-    "            vt.extend(by_dir.cpu().numpy().flatten())\n",
-    "    \n",
-    "    vpb = np.array(vp) > 0.5\n",
-    "    acc = accuracy_score(vt, vpb)\n",
-    "    f1 = f1_score(vt, vpb, zero_division=0)\n",
-    "    prec = precision_score(vt, vpb, zero_division=0)\n",
-    "    rec = recall_score(vt, vpb, zero_division=0)\n",
-    "    auc = roc_auc_score(vt, vp)\n",
-    "    \n",
-    "    if epoch < warmup_epochs: warmup_scheduler.step()\n",
-    "    else: plateau_scheduler.step(auc)\n",
-    "    \n",
-    "    avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0\n",
-    "    print(f\"Epoch {epoch}, AUC: {auc:.4f}, Acc: {acc:.4f}, F1: {f1:.4f}, Prec: {prec:.4f}, Rec: {rec:.4f}, LR: {optimizer.param_groups[0]['lr']:.6f}, GradNorm: {avg_grad_norm:.4f}\")\n",
-    "    \n",
-    "    if auc > best_auc:\n",
-    "        best_auc = auc\n",
-    "        best_model = copy.deepcopy(model.state_dict())\n",
-    "        torch.save(best_model, \"best_model.pth\")\n",
-    "        _ckpt_dst = (\n",
-    "            \"/content/drive/MyDrive/hope_models/best_model.pth\" if env == 'colab'\n",
-    "            else \"/kaggle/working/best_model.pth\"\n",
-    "        )\n",
-    "        try:\n",
-    "            os.makedirs(os.path.dirname(_ckpt_dst), exist_ok=True)\n",
-    "            shutil.copy(\"best_model.pth\", _ckpt_dst)\n",
-    "        except Exception as _e:\n",
-    "            print(f\"WARNING: Could not copy checkpoint to {_ckpt_dst}: {_e}\")\n",
-    "        patience_counter = 0\n",
-    "    else:\n",
-    "        patience_counter += 1\n",
-    "        if patience_counter >= early_stop_patience:\n",
-    "            print(f\"Early stopping triggered at epoch {epoch}\")\n",
-    "            break\n",
-    "\n",
-    "if 'best_model' in locals(): model.load_state_dict(best_model)\n",
-    "print(f\"Final Best AUC: {best_auc:.4f}\")\n"
-]
-
-# Cell 7: Visualization
-viz_src = [
-    "import matplotlib.pyplot as plt\n",
-    "import seaborn as sns\n",
-    "from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay\n",
-    "\n",
-    "if 'vt' in globals() and 'vpb' in globals():\n",
-    "    cm = confusion_matrix(vt, vpb)\n",
-    "    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=['Down', 'Up'])\n",
-    "    disp.plot(cmap=plt.cm.Blues)\n",
-    "    plt.title(\"Confusion Matrix\")\n",
-    "    plt.show()\n"
-]
-
-# Cell 8: Threshold Sweep (Task 29)
-threshold_sweep_src = [
-    "import numpy as np\n",
-    "from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score\n",
-    "\n",
-    "print(\"--- Decision Threshold Sweep ---\")\n",
-    "print(f\"{'Threshold':>10} {'Accuracy':>10} {'F1':>10} {'Precision':>10} {'Recall':>10}\")\n",
-    "best_thresh_f1 = 0.0\n",
-    "best_thresh = 0.5\n",
-    "vp_arr = np.array(vp)\n",
-    "for thresh in [round(t * 0.01, 2) for t in range(45, 66)]:\n",
-    "    vpb_t = vp_arr > thresh\n",
-    "    acc_t = accuracy_score(vt, vpb_t)\n",
-    "    f1_t = f1_score(vt, vpb_t, zero_division=0)\n",
-    "    prec_t = precision_score(vt, vpb_t, zero_division=0)\n",
-    "    rec_t = recall_score(vt, vpb_t, zero_division=0)\n",
-    "    print(f\"{thresh:>10.2f} {acc_t:>10.4f} {f1_t:>10.4f} {prec_t:>10.4f} {rec_t:>10.4f}\")\n",
-    "    if f1_t > best_thresh_f1:\n",
-    "        best_thresh_f1 = f1_t\n",
-    "        best_thresh = thresh\n",
-    "\n",
-    "print(f\"\\nRecommended DERIV_THRESHOLD={best_thresh:.2f} (F1={best_thresh_f1:.4f})\")\n",
-    "print(\"Set this value in your .env file before deploying.\")\n"
-]
-
-# Cell 9: Export — with best_model reload guard (Task 31)
-export_src = [
-    "if 'best_model' not in locals() and 'best_model' not in globals():\n",
-    "    _ckpt = torch.load(\"best_model.pth\", weights_only=True)\n",
-    "    model.load_state_dict(_ckpt)\n",
-    "    print(\"Reloaded best_model.pth from disk (kernel restart detected).\")\n",
-    "\n",
-    "model.eval()\n",
-    "class InferenceModel(nn.Module):\n",
-    "    def __init__(self, trained_model):\n",
-    "        super().__init__()\n",
-    "        self.model = trained_model\n",
-    "    def forward(self, x):\n",
-    "        direction, _ = self.model(x)\n",
-    "        return direction\n",
-    "\n",
-    "infer_model = InferenceModel(model)\n",
-    "infer_model.eval()\n",
-    "dummy = torch.randn(1, 32, 8).to(device)\n",
-    "\n",
-    "torch.onnx.export(\n",
-    "    infer_model, dummy, \"model.onnx\",\n",
-    "    export_params=True, opset_version=15, do_constant_folding=True,\n",
-    "    input_names=['input'], output_names=['output']\n",
-    ")\n",
-    "print(\"Model exported to model.onnx (Opset 15)\")\n",
-    "\n",
-    "import onnxruntime as ort\n",
-    "sess = ort.InferenceSession(\"model.onnx\")\n",
-    "out = sess.run(None, {'input': dummy.cpu().numpy()})[0]\n",
-    "assert out.shape == (1, 1), f\"Unexpected output shape: {out.shape}\"\n",
-    "assert 0.0 <= out.item() <= 1.0, f\"Output {out.item():.4f} is not in [0, 1]\"\n",
-    "print(f\"ONNX Model validation successful. Output: {out.item():.4f}\")\n",
-    "\n",
-    "quantization_succeeded = True\n",
-    "try:\n",
-    "    from onnxruntime.quantization import quantize_dynamic, QuantType\n",
-    "    quant_path = \"model_quantized.onnx\"\n",
-    "    quantize_dynamic(\"model.onnx\", quant_path, weight_type=QuantType.QInt8)\n",
-    "    print(f\"Dynamic INT8 Quantization Successful: {quant_path}\")\n",
-    "except Exception as e:\n",
-    "    quantization_succeeded = False\n",
-    "    print(f\"Quantization skipped or failed: {e}\")\n",
-    "\n",
-    "if quantization_succeeded:\n",
-    "    print(\"Deploy model_quantized.onnx\")\n",
-    "else:\n",
-    "    print(\"WARNING: Quantization failed. Use model.onnx instead.\")\n",
-    "\n",
-    "# --- Cryptographic Signing Pipeline ---\n",
-    "try:\n",
-    "    from cryptography.hazmat.primitives import serialization\n",
-    "    from cryptography.hazmat.primitives.asymmetric import ed25519\n",
-    "    key_hex = os.environ.get('MODEL_SIGNING_KEY')\n",
-    "    if key_hex:\n",
-    "        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(key_hex))\n",
-    "        for target in ['model.onnx', 'model_quantized.onnx']:\n",
-    "            if os.path.exists(target):\n",
-    "                with open(target, 'rb') as f: data = f.read()\n",
-    "                signature = private_key.sign(data)\n",
-    "                with open(target + '.sig', 'wb') as f: f.write(signature)\n",
-    "                print(f'Signed {target} -> {target}.sig')\n",
-    "    else:\n",
-    "        print('WARNING: MODEL_SIGNING_KEY not found. Models will not be signed.')\n",
-    "except ImportError:\n",
-    "    print('Signing skipped (cryptography library not installed)')\n"
-]
-
-def make_cell(src, cell_type="code"):
-    return {"cell_type": cell_type, "metadata": {}, "outputs": [], "source": src}
-
-nb['cells'] = [
-    make_cell(["# Hope: GatedTCN Model V4 - Advanced Training\n\n> **Instructions:** Run all cells sequentially from top to bottom in a fresh runtime. Do not skip cells or re-run individual cells out of order.\n"], "markdown"),
-    make_cell(env_detection_src),
-    make_cell(pip_install_src),
-    make_cell(imports_src),
-    make_cell(seed_src),
-    make_cell(data_loading_src),
-    make_cell(training_src),
-    make_cell(viz_src),
-    make_cell(threshold_sweep_src),
-    make_cell(export_src),
-]
-
-with open(nb_path, "w") as f:
-    json.dump(nb, f, indent=1)
-
-print("Notebook restored and cleaned up successfully.")
+if __name__ == "__main__":
+    os.makedirs("notebooks", exist_ok=True)
+    
+    colab_nb = make_notebook("Hope Colab Training", colab_cells, env='colab')
+    with open("notebooks/colab_training.ipynb", "w") as f:
+        json.dump(colab_nb, f, indent=1)
+    print("Restored notebooks/colab_training.ipynb")
+    
+    kaggle_nb = make_notebook("Hope Kaggle Training", kaggle_cells, env='kaggle')
+    with open("notebooks/kaggle_training.ipynb", "w") as f:
+        json.dump(kaggle_nb, f, indent=1)
+    print("Restored notebooks/kaggle_training.ipynb")
+    
+    # Remove deprecated notebook if it exists
+    deprecated_nb = "notebooks/train_transformer.ipynb"
+    if os.path.exists(deprecated_nb):
+        os.remove(deprecated_nb)
+        print(f"Removed deprecated notebook: {deprecated_nb}")

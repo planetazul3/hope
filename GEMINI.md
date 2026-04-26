@@ -61,9 +61,9 @@ Tick collection and export tools must maintain high fidelity, performance, and p
 
 ## ML Engineering Standards
 All model training and export workflows must adhere to these standards:
-- **Architecture**: Canonical Causal Transformer Encoder ($L=32$, $O(L^2)$ mathematical optimality) with a prepended `[CLS]` token.
-- **Optimization**: Training loops must use a two-phase curriculum starting with Contrastive Pre-training (TS2Vec: Hierarchical Contrastive Learning with latent-space timestamp masking and random cropping using InfoNCE loss) and then Supervised Fine-tuning with Focal Loss and Volatility Huber Loss, using ReduceLROnPlateau and warmup scheduler.
-- **Features**: Preprocessing must include 8 features: 5 base features, 2 Daubechies (db2/db3) wavelet coefficients A1 and D1 computed as $O(N)$ FIR filter banks, and 1 short-to-long-term volatility ratio.
+- **Architecture**: Use Canonical Causal Transformer Encoder ($L=32$, $O(L^2)$ complexity) with a prepended [CLS] token and Multi-Task Learning (Direction + Volatility heads).
+- **Optimization**: Training loops must use a two-phase curriculum starting with TS2Vec (Hierarchical Contrastive Learning with InfoNCE) and then Supervised Fine-tuning with Focal Loss and Volatility Huber Loss, using ReduceLROnPlateau and warmup scheduler.
+- **Features**: Preprocessing must include 8 features: 5 base features, 2 Daubechies (db2/db3) FIR filter bank coefficients instead of Haar wavelets, and 1 short-to-long-term volatility ratio.
 - **Batching**: Use PyTorch `DataLoader` and `TensorDataset`.
 - **Integrity**: Always load the best recorded state dictionary before exporting to ONNX.
 - **Export**: ONNX models must use static graphs (batch size 1, sequence length 32) and dynamic INT8 Quantization (`QuantType.QInt8`).

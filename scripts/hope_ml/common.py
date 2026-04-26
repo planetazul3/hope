@@ -91,19 +91,19 @@ def prepare_features(prices, seq_len=32):
     h = np.array([0.482962913144690, 0.836516303737469, 0.224143868041857, -0.129409522550921])
     g = np.array([-0.129409522550921, -0.224143868041857, 0.836516303737469, -0.482962913144690])
     
-    a1 = np.zeros(len(prices) - 1)
-    d1 = np.zeros(len(prices) - 1)
+    db2_a1 = np.zeros(len(prices) - 1)
+    db2_d1 = np.zeros(len(prices) - 1)
     for i in range(len(prices) - 1):
         if i >= 3:
             p_window = np.array([prices[i+1], prices[i], prices[i-1], prices[i-2]])
-            a1[i] = np.dot(p_window, h)
-            d1[i] = np.dot(p_window, g)
+            db2_a1[i] = np.dot(p_window, h)
+            db2_d1[i] = np.dot(p_window, g)
         else:
-            a1[i] = 0.0
-            d1[i] = 0.0
+            db2_a1[i] = 0.0
+            db2_d1[i] = 0.0
 
     p_curr = prices[1:]
-    a1_norm = a1 / (p_curr + 1e-8)
+    db2_a1_norm = db2_a1 / (p_curr + 1e-8)
 
     streaks, reversals = [], []
     last_trend_direction, last_direction, curr_streak, ticks_since_reversal = 0, 0, 0, 0
@@ -122,7 +122,7 @@ def prepare_features(prices, seq_len=32):
     norm_streaks = np.log1p(np.array(streaks, dtype=np.float32))
     norm_reversals = np.log1p(np.array(reversals, dtype=np.float32))
 
-    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, a1_norm, d1, vol_ratio], axis=1)
+    features = np.stack([directions, norm_magnitudes, norm_streaks, norm_reversals, vol, db2_a1_norm, db2_d1, vol_ratio], axis=1)
 
     x, y_dir, y_vol = [], [], []
     for i in range(len(features) - seq_len):
@@ -137,7 +137,7 @@ def prepare_features(prices, seq_len=32):
     n_samples = x_tensor.shape[0]
     pos_ratio = float(torch.sum(y_dir_tensor) / n_samples) * 100
     logging.info(f"prepare_features: shape={tuple(x_tensor.shape)}, samples={n_samples}, class_balance={pos_ratio:.2f}% positive")
-    for col_idx, col_name in enumerate(["direction", "norm_magnitude", "norm_streak", "norm_reversal", "vol", "a1_norm", "d1", "vol_ratio"]):
+    for col_idx, col_name in enumerate(["direction", "norm_magnitude", "norm_streak", "norm_reversal", "vol", "db2_a1", "db2_d1", "vol_ratio"]):
         col = x_tensor[:, :, col_idx]
         logging.info(f"  feature[{col_idx}] {col_name}: mean={col.mean().item():.4f}, std={col.std().item():.4f}")
 

@@ -61,12 +61,12 @@ make consolidate
 
 ## Model Configuration
 
-### GatedTCN V4 (Noise-Resilient)
-The system defaults to a Gated TCN with Haar Wavelet feature extraction.
+### Canonical Causal Transformer (Production Hardened)
+The system defaults to a Canonical Causal Transformer Encoder with Multi-Task Learning.
 - **Requirement**: `TRANSFORMER_SEQUENCE_LENGTH` in `.env` must be set to **32**.
-- **Features**: 8-dimensional input including Level-1 Haar Approximation and Detail coefficients.
-- **Inference**: Handled by `tract` in Rust. Optimizations include SE channel attention.
-- **Latency**: Sub-ms (<0.2ms) due to convolutional efficiency over attention.
+- **Features**: 8-dimensional input including Daubechies (db2) FIR filter bank Approximation and Detail coefficients.
+- **Inference**: Handled by `tract` in Rust. Executes a static graph (1x32x8) with dynamic INT8 Quantization.
+- **Optimization**: Zero-allocation hot path with pre-allocated buffers for sub-ms latency.
 
 ### Strategy Thresholds
 The `StrategyEngine` uses dynamic modifiers that can be tuned in `.env`:

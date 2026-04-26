@@ -12,6 +12,8 @@ use tract_onnx::prelude::*;
 use crate::strategy::ProbabilityModel;
 use crate::tick_processor::TickSnapshot;
 
+/// Canonical Causal Transformer probability model using ONNX inference.
+/// Executes a static execution graph (1x32x8) with dynamic INT8 Quantization over a zero-allocation hot path.
 pub struct TransformerModel {
     sequence_length: usize,
     tx: Option<Sender<Vec<TickSnapshot>>>,
@@ -102,9 +104,9 @@ impl TransformerModel {
                         data_buffer[base + 4] = tick.volatility as f32;
 
                         let safe_price = if tick.price == 0.0 { 1e-8 } else { tick.price };
-                        let a1_norm = (tick.dwt_a1 / (safe_price + 1e-8_f64)) as f32;
+                        let a1_norm = (tick.db2_a1 / (safe_price + 1e-8_f64)) as f32;
                         data_buffer[base + 5] = a1_norm;
-                        data_buffer[base + 6] = tick.dwt_d1 as f32;
+                        data_buffer[base + 6] = tick.db2_d1 as f32;
                         data_buffer[base + 7] = tick.vol_ratio as f32;
 
                         for j in 0..8 {
@@ -206,15 +208,15 @@ mod tests {
     fn test_a1_normalization_alignment() {
         let tick = TickSnapshot {
             price: 0.0,
-            dwt_a1: 1.41421356,
+            db2_a1: 1.41421356,
             ..Default::default()
         };
 
         let safe_price = 1e-8;
-        let expected = (tick.dwt_a1 / (safe_price + 1e-8)) as f32;
+        let expected = (tick.db2_a1 / (safe_price + 1e-8)) as f32;
 
         let actual_safe_price = if tick.price == 0.0 { 1e-8 } else { tick.price };
-        let actual = (tick.dwt_a1 / (actual_safe_price + 1e-8)) as f32;
+        let actual = (tick.db2_a1 / (actual_safe_price + 1e-8)) as f32;
 
         assert_eq!(actual, expected);
     }

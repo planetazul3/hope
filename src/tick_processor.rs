@@ -26,8 +26,8 @@ pub struct TickSnapshot {
     pub drift: f64,
     pub return_magnitude: f64,
     pub ticks_since_reversal: u32,
-    pub dwt_a1: f64,
-    pub dwt_d1: f64,
+    pub db2_a1: f64,
+    pub db2_d1: f64,
     pub long_term_volatility: f64,
     pub vol_ratio: f64,
 }
@@ -47,6 +47,39 @@ pub struct TickProcessor {
     long_sum_returns: f64,
     long_sq_sum_returns: f64,
 }
+
+const DB2_H: [f64; 4] = [
+    0.482962913144690,
+    0.836516303737469,
+    0.224143868041857,
+    -0.129409522550921,
+];
+const DB2_G: [f64; 4] = [
+    -0.129409522550921,
+    -0.224143868041857,
+    0.836516303737469,
+    -0.482962913144690,
+];
+
+// Reserved for future DB3 (6-tap) support
+#[allow(dead_code)]
+const DB3_H: [f64; 6] = [
+    0.332670552950,
+    0.806891509311,
+    0.459877502118,
+    -0.135011020010,
+    -0.085441273882,
+    0.035226291885,
+];
+#[allow(dead_code)]
+const DB3_G: [f64; 6] = [
+    0.035226291885,
+    0.085441273882,
+    -0.135011020010,
+    -0.459877502118,
+    0.806891509311,
+    -0.332670552950,
+];
 
 impl Default for TickProcessor {
     fn default() -> Self {
@@ -112,27 +145,14 @@ impl TickProcessor {
             self.last_trend_direction = direction;
         }
 
-        let (dwt_a1, dwt_d1) = if self.len >= 4 {
-            let h = [
-                0.482962913144690,
-                0.836516303737469,
-                0.224143868041857,
-                -0.129409522550921,
-            ];
-            let g = [
-                -0.129409522550921,
-                -0.224143868041857,
-                0.836516303737469,
-                -0.482962913144690,
-            ];
-
+        let (db2_a1, db2_d1) = if self.len >= 4 {
             let p0 = price;
             let p1 = self.ring[(self.next_index + Self::CAPACITY - 1) % Self::CAPACITY].price;
             let p2 = self.ring[(self.next_index + Self::CAPACITY - 2) % Self::CAPACITY].price;
             let p3 = self.ring[(self.next_index + Self::CAPACITY - 3) % Self::CAPACITY].price;
 
-            let a1 = p0 * h[0] + p1 * h[1] + p2 * h[2] + p3 * h[3];
-            let d1 = p0 * g[0] + p1 * g[1] + p2 * g[2] + p3 * g[3];
+            let a1 = p0 * DB2_H[0] + p1 * DB2_H[1] + p2 * DB2_H[2] + p3 * DB2_H[3];
+            let d1 = p0 * DB2_G[0] + p1 * DB2_G[1] + p2 * DB2_G[2] + p3 * DB2_G[3];
             (a1, d1)
         } else {
             (0.0, 0.0)
@@ -147,8 +167,8 @@ impl TickProcessor {
             drift: 0.0,
             return_magnitude: current_return.abs(),
             ticks_since_reversal: self.ticks_since_reversal,
-            dwt_a1,
-            dwt_d1,
+            db2_a1,
+            db2_d1,
             long_term_volatility: 0.0,
             vol_ratio: 0.0,
         };
@@ -189,7 +209,7 @@ impl TickProcessor {
         self.last_streak = streak;
 
         // Calculate volatility and drift over the available history
-        let (volatility, drift, _, _) = self.calculate_stats(dwt_a1, dwt_d1);
+        let (volatility, drift, _, _) = self.calculate_stats(db2_a1, db2_d1);
         let long_term_volatility = self.calculate_long_term_volatility();
         let vol_ratio = volatility / (long_term_volatility + 1e-8);
 
