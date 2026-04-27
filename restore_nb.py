@@ -57,9 +57,6 @@ colab_cells = [
         "\n",
         "# 3. Set up Path and Run Training\n",
         "import sys\n",
-        "import os\n",
-        "repo_root = '/content/hope' if os.path.exists('/content/hope') else os.getcwd()\n",
-        "sys.path.append(os.path.join(repo_root, 'scripts'))\n",
         "sys.path.append('/content/drive/MyDrive/hope/scripts')\n",
         "\n",
         "import train_fixed\n",
@@ -76,19 +73,41 @@ kaggle_cells = [
         "Requires `ticks.csv` as an input dataset."
     ]),
     make_code_cell([
-        "# 1. Install Dependencies\n",
-        "!pip install torch==2.11.0 pandas==3.0.2 numpy==2.4.4 scikit-learn==1.8.0 tqdm==4.67.3 cryptography==42.0.5 onnx==1.21.0 onnxruntime==1.20.1\n",
+        "!rm -rf hope\n",
+        "!git clone https://github.com/planetazul3/hope.git\n",
+        "%cd hope\n",
+        "!git pull origin main\n"
+    ]),
+    make_code_cell([
+        "!pip install -r requirements.txt\n"
+    ]),
+    make_code_cell([
+        "import os, sys\n",
+        "import torch\n",
+        "from kaggle_secrets import UserSecretsClient\n",
         "\n",
-        "# 2. Set up Path and Run Training\n",
-        "import sys\n",
-        "import os\n",
+        "assert torch.cuda.is_available(), \"CRITICAL: GPU not detected. Aborting to save quota.\"\n",
         "\n",
-        "# Resilient sys path for Kaggle\n",
-        "repo_root = '/kaggle/working/hope' if os.path.exists('/kaggle/working/hope') else os.getcwd()\n",
+        "try:\n",
+        "    user_secrets = UserSecretsClient()\n",
+        "    os.environ[\"MODEL_SIGNING_KEY\"] = user_secrets.get_secret(\"MODEL_SIGNING_KEY\")\n",
+        "    print(\"Ed25519 Signing Key loaded securely.\")\n",
+        "except Exception as e:\n",
+        "    print(\"WARNING: MODEL_SIGNING_KEY not found in Kaggle Secrets. Model signing will fail or skip.\")\n"
+    ]),
+    make_code_cell([
+        "# Ensure local scripts can be imported\n",
+        "repo_root = '/kaggle/working/hope'\n",
         "sys.path.append(os.path.join(repo_root, 'scripts'))\n",
         "\n",
         "import train_fixed\n",
-        "train_fixed.main()\n"
+        "# Pass Kaggle's read-only dataset path directly\n",
+        "train_fixed.main(csv_path=\"/kaggle/input/ticks-csv/ticks.csv\")\n"
+    ]),
+    make_code_cell([
+        "# Move artifacts to /kaggle/working so they can be downloaded\n",
+        "!cp model.onnx model.onnx.sig /kaggle/working/\n",
+        "print(\"Artifacts successfully moved to working directory for download.\")\n"
     ])
 ]
 

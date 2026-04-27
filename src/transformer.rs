@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Context, Result};
 use arc_swap::ArcSwap;
-use crossbeam_channel::{bounded, Sender, TrySendError};
+use crossbeam_queue::ArrayQueue;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use tracing::{error, info, warn};
@@ -16,8 +17,10 @@ use crate::tick_processor::TickSnapshot;
 /// Executes a static execution graph (1x32x8) with dynamic INT8 Quantization over a zero-allocation hot path.
 pub struct TransformerModel {
     sequence_length: usize,
-    tx: Option<Sender<Vec<TickSnapshot>>>,
+    queue: Arc<ArrayQueue<Vec<f32>>>,
+    pool: Arc<ArrayQueue<Vec<f32>>>,
     latest_prob: Arc<ArcSwap<f64>>,
+    is_running: Arc<AtomicBool>,
     _handle: Option<thread::JoinHandle<()>>,
 }
 
@@ -47,112 +50,82 @@ impl TransformerModel {
                 )
                 .context("failed to parse Ed25519 public key")?;
 
-                let signature =
-                    Signature::from_slice(&sig_bytes).context("invalid signature format")?;
+                let signature = Signature::from_slice(&sig_bytes)
+                    .context("invalid Ed25519 signature format")?;
 
                 public_key
                     .verify(&model_bytes, &signature)
-                    .map_err(|err| anyhow!("MODEL SIGNATURE VERIFICATION FAILED: {}", err))?;
+                    .context("model signature verification failed")?;
                 info!("model signature verified successfully");
             } else {
-                warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-                warn!("WARNING: MODEL SIGNATURE FILE MISSING (.onnx.sig)");
-                warn!("A public key was provided, but no signature was found.");
-                warn!("Proceeding with UNVERIFIED model at user's risk.");
-                warn!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+                warn!("MODEL_PUBLIC_KEY provided, but no .sig file found; proceeding without verification");
             }
-        } else {
-            warn!("loading model WITHOUT signature verification (MODEL_PUBLIC_KEY not set)");
         }
 
         let model = tract_onnx::onnx()
-            .model_for_read(&mut &model_bytes[..])
-            .with_context(|| format!("failed to parse ONNX model from {}", path.display()))?
-            .with_input_fact(0, f32::fact([1, sequence_length, 8]).into())
-            .context("failed to set model input facts")?
-            .into_optimized()
-            .context("failed to optimize model graph")?
-            .into_runnable()
-            .context("failed to convert model to runnable form")?;
+            .model_for_path(path)?
+            .into_optimized()?
+            .into_runnable()?;
 
-        let (tx, rx) = bounded::<Vec<TickSnapshot>>(2); // keep it small, discard if full
+        let queue: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(2));
+        let pool: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(2));
+
+        // Pre-allocate zero-allocation feature buffers
+        for _ in 0..2 {
+            let _ = pool.push(vec![0.0f32; sequence_length * 8]);
+        }
+
         let latest_prob = Arc::new(ArcSwap::from_pointee(0.5));
+        let is_running = Arc::new(AtomicBool::new(true));
+
+        let pool_clone = Arc::clone(&pool);
+        let queue_clone = Arc::clone(&queue);
         let latest_prob_clone = Arc::clone(&latest_prob);
+        let is_running_clone = Arc::clone(&is_running);
 
         let _handle = thread::Builder::new()
             .name("inference".into())
             .spawn(move || {
-                let mut data_buffer = vec![0.0f32; sequence_length * 8];
                 let shape = vec![1, sequence_length, 8];
                 let mut input_tensor = Tensor::zero::<f32>(&shape).unwrap();
-                let mut input_tvec = tvec![input_tensor.clone().into()];
+                let backoff = crossbeam_utils::Backoff::new();
 
-                while let Ok(sequence) = rx.recv() {
-                    if sequence.len() < sequence_length {
-                        continue;
-                    }
-
-                    // Zero-allocation hot path update for inference thread
-                    let mut valid = true;
-                    for (i, tick) in sequence.iter().enumerate() {
-                        let base = i * 8;
-                        data_buffer[base] = tick.direction.as_i8() as f32;
-                        data_buffer[base + 1] =
-                            (tick.return_magnitude as f32) / (tick.volatility as f32 + 1e-8);
-                        data_buffer[base + 2] = (tick.streak as f32).ln_1p();
-                        data_buffer[base + 3] = (tick.ticks_since_reversal as f32).ln_1p();
-                        data_buffer[base + 4] = tick.volatility as f32;
-
-                        let safe_price = if tick.price == 0.0 { 1e-8 } else { tick.price };
-                        let a1_norm = (tick.db2_a1 / (safe_price + 1e-8_f64)) as f32;
-                        data_buffer[base + 5] = a1_norm;
-                        data_buffer[base + 6] = tick.db2_d1 as f32;
-                        data_buffer[base + 7] = tick.vol_ratio as f32;
-
-                        for j in 0..8 {
-                            if data_buffer[base + j].is_nan() || data_buffer[base + j].is_infinite()
-                            {
-                                valid = false;
-                                break;
+                while is_running_clone.load(Ordering::Acquire) {
+                    if let Some(data_buffer) = queue_clone.pop() {
+                        // Zero-allocation hot path update using State Recycling
+                        if let Ok(mut view) = input_tensor.to_array_view_mut::<f32>() {
+                            if let Some(slice) = view.as_slice_mut() {
+                                slice.copy_from_slice(&data_buffer);
+                            } else {
+                                input_tensor = Tensor::from_shape(&shape, &data_buffer).unwrap();
                             }
-                        }
-                        if !valid {
-                            break;
-                        }
-                    }
-
-                    if !valid {
-                        error!("corrupted features: NaN or Inf detected");
-                        continue;
-                    }
-
-                    // Avoid heap allocation by using Tensor::from_slice_align or updating directly
-                    // if tract allows mutable access
-                    if let Ok(mut view) = input_tensor.to_array_view_mut::<f32>() {
-                        if let Some(slice) = view.as_slice_mut() {
-                            slice.copy_from_slice(&data_buffer);
                         } else {
-                            // Fallback if not contiguous
+                            // Fallback if tract tensor data layout changed or is not uniquely owned
                             input_tensor = Tensor::from_shape(&shape, &data_buffer).unwrap();
                         }
-                    } else {
-                        input_tensor = Tensor::from_shape(&shape, &data_buffer).unwrap();
-                    }
 
-                    input_tvec[0] = input_tensor.clone().into();
+                        let input_tvec = tvec![input_tensor.clone().into()];
 
-                    match model.run(input_tvec.clone()) {
-                        Ok(outputs) => {
-                            if let Ok(output_view) = outputs[0].to_array_view::<f32>() {
-                                if let Some(&prob) = output_view.as_slice().and_then(|s| s.first())
-                                {
-                                    latest_prob_clone.store(Arc::new(prob as f64));
+                        match model.run(input_tvec) {
+                            Ok(outputs) => {
+                                if let Ok(output_view) = outputs[0].to_array_view::<f32>() {
+                                    if let Some(&prob) =
+                                        output_view.as_slice().and_then(|s| s.first())
+                                    {
+                                        latest_prob_clone.store(Arc::new(prob as f64));
+                                    }
                                 }
                             }
+                            Err(err) => {
+                                error!(error = %err, "tract-onnx inference failed");
+                            }
                         }
-                        Err(err) => {
-                            error!(error = %err, "tract-onnx inference failed");
-                        }
+
+                        // Return the buffer to the pool to prevent allocation
+                        let _ = pool_clone.push(data_buffer);
+                        backoff.reset();
+                    } else {
+                        backoff.snooze();
                     }
                 }
             })
@@ -160,8 +133,10 @@ impl TransformerModel {
 
         Ok(Self {
             sequence_length,
-            tx: Some(tx),
+            queue,
+            pool,
             latest_prob,
+            is_running,
             _handle: Some(_handle),
         })
     }
@@ -169,7 +144,7 @@ impl TransformerModel {
 
 impl Drop for TransformerModel {
     fn drop(&mut self) {
-        self.tx.take(); // drops sender to terminate thread
+        self.is_running.store(false, Ordering::Release);
         if let Some(handle) = self._handle.take() {
             let _ = handle.join();
         }
@@ -180,18 +155,42 @@ impl ProbabilityModel for TransformerModel {
     fn probability_up(&mut self, _tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
         if history.len() >= self.sequence_length {
             let start_idx = history.len() - self.sequence_length;
-            let sequence = history[start_idx..].to_vec();
+            let sequence = &history[start_idx..];
 
-            if let Some(tx) = &self.tx {
-                match tx.try_send(sequence) {
-                    Ok(_) => {}
-                    Err(TrySendError::Full(_)) => {
-                        // It's a lock-free channel of size 2, so dropping the newest if it's lagging
-                        // is fine to maintain non-blocking behavior.
+            if let Some(mut data_buffer) = self.pool.pop() {
+                let mut valid = true;
+                for (i, tick) in sequence.iter().enumerate() {
+                    let base = i * 8;
+                    data_buffer[base] = tick.direction.as_i8() as f32;
+                    data_buffer[base + 1] =
+                        (tick.return_magnitude as f32) / (tick.volatility as f32 + 1e-8);
+                    data_buffer[base + 2] = (tick.streak as f32).ln_1p();
+                    data_buffer[base + 3] = (tick.ticks_since_reversal as f32).ln_1p();
+                    data_buffer[base + 4] = tick.volatility as f32;
+
+                    let safe_price = if tick.price == 0.0 { 1e-8 } else { tick.price };
+                    let a1_norm = (tick.db2_a1 / (safe_price + 1e-8_f64)) as f32;
+                    data_buffer[base + 5] = a1_norm;
+                    data_buffer[base + 6] = tick.db2_d1 as f32;
+                    data_buffer[base + 7] = tick.vol_ratio as f32;
+
+                    for j in 0..8 {
+                        if data_buffer[base + j].is_nan() || data_buffer[base + j].is_infinite() {
+                            valid = false;
+                            break;
+                        }
                     }
-                    Err(TrySendError::Disconnected(_)) => {
-                        error!("inference thread disconnected");
+                    if !valid {
+                        break;
                     }
+                }
+
+                if !valid {
+                    error!("corrupted features: NaN or Inf detected");
+                    let _ = self.pool.push(data_buffer);
+                } else if let Err(err) = self.queue.push(data_buffer) {
+                    // Queue full, return to pool
+                    let _ = self.pool.push(err);
                 }
             }
         }

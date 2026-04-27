@@ -44,10 +44,17 @@ def load_data_from_csv(csv_path):
 
 def generate_ed25519_keypair_and_sign(model_path):
     try:
+        signing_key_hex = os.environ.get("MODEL_SIGNING_KEY")
+        if not signing_key_hex:
+            logger.warning("MODEL_SIGNING_KEY not found in environment. Skipping Ed25519 signature generation.")
+            return
+
         from cryptography.hazmat.primitives.asymmetric import ed25519
         from cryptography.hazmat.primitives import serialization
 
-        private_key = ed25519.Ed25519PrivateKey.generate()
+        # Convert hex back to bytes
+        key_bytes = bytes.fromhex(signing_key_hex)
+        private_key = ed25519.Ed25519PrivateKey.from_private_bytes(key_bytes)
         public_key = private_key.public_key()
         
         with open(model_path, 'rb') as f:
