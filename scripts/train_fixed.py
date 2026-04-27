@@ -35,11 +35,18 @@ def load_data_from_csv(csv_path):
         logger.error(f"CSV not found: {csv_path}")
         return None
     logger.info(f"Loading data from: {csv_path}")
-    df = pd.read_csv(csv_path, header=None)
+    
+    df = pd.read_csv(csv_path, header=None, on_bad_lines='skip')
+    
+    # Check if the first row is a header (e.g., contains 'quote') and drop it
+    if str(df.iloc[0, -1]).strip().lower() == 'quote':
+        df = df.iloc[1:].reset_index(drop=True)
+        
     if df.shape[1] >= 3:
         prices = df.iloc[:, 2].values
     else:
         prices = df.iloc[:, 1].values
+        
     return prices.astype(np.float32)
 
 def generate_ed25519_keypair_and_sign(model_path):
