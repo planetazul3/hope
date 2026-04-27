@@ -671,11 +671,11 @@ impl Engine {
 
         if outcome.enter_cooldown {
             self.cooldown_remaining = self.config.cooldown_ticks;
-            if self.fsm.state() != TradingState::Cooldown {
-                if self.transition(TradingState::Cooldown).is_err() {
-                    self.fsm.reset_to_idle();
-                    self.transition(TradingState::Cooldown)?;
-                }
+            if self.fsm.state() != TradingState::Cooldown
+                && self.transition(TradingState::Cooldown).is_err()
+            {
+                self.fsm.reset_to_idle();
+                self.transition(TradingState::Cooldown)?;
             }
             warn!(
                 consecutive_losses = outcome.consecutive_losses,

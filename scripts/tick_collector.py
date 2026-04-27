@@ -370,7 +370,8 @@ class CollectionService:
             self.stats.duplicates += len(times) - inserted
 
             oldest, newest = min(times), max(times)
-            fmt = lambda ts: datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            def fmt(ts: float) -> str:
+                return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
             logger.info(
                 f"[{self.symbol}] batch={self.stats.batches} ticks={len(times)} "
                 f"new={inserted} range=[{fmt(oldest)} → {fmt(newest)}]"
@@ -452,7 +453,8 @@ class CollectionService:
             self.stats.duplicates += len(times) - inserted
 
             newest = max(times)
-            fmt = lambda ts: datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+            def fmt(ts: float) -> str:
+                return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
             logger.info(
                 f"[{self.symbol}] batch={self.stats.batches} ticks={len(times)} "
                 f"new={inserted} range=[{fmt(min(times))} → {fmt(newest)}]"

@@ -180,7 +180,7 @@ impl TickProcessor {
         self.len = self.len.saturating_add(1).min(Self::CAPACITY);
 
         // O(1) Incremental Stats Update
-        if let Some(_) = self.last_price {
+        if self.last_price.is_some() {
             // Short-term window: subtract oldest return only if we have more returns than the window size
             if self.len > Self::VOLATILITY_WINDOW + 1 {
                 let idx_out = (self.next_index + Self::CAPACITY - Self::VOLATILITY_WINDOW - 2)
@@ -207,7 +207,7 @@ impl TickProcessor {
 
             // Periodically recalculate to clear floating point drift
             self.push_count += 1;
-            if self.push_count % 1000 == 0 {
+            if self.push_count.is_multiple_of(1000) {
                 self.recalculate_sums();
             }
         }
@@ -259,6 +259,11 @@ impl TickProcessor {
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn last_n_into(&self, n: usize, out: &mut [TickSnapshot]) -> usize {

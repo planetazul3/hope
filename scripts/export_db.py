@@ -168,7 +168,7 @@ def export_ticks(args: argparse.Namespace) -> None:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY epoch ASC"
 
-        count_query = f"SELECT COUNT(*) FROM ticks"
+        count_query = "SELECT COUNT(*) FROM ticks"
         if conditions:
             count_query += " WHERE " + " AND ".join(conditions)
 
@@ -191,8 +191,11 @@ def export_ticks(args: argparse.Namespace) -> None:
         if use_parquet:
             # Try fastparquet first (supports append); fallback to pyarrow for new files only
             try:
-                import fastparquet
-                parquet_engine = 'fastparquet'
+                import importlib.util
+                if importlib.util.find_spec("fastparquet") is not None:
+                    parquet_engine = 'fastparquet'
+                else:
+                    raise ImportError
             except ImportError:
                 try:
                     import pyarrow as pa

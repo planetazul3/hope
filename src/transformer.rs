@@ -206,7 +206,7 @@ mod tests {
     fn test_a1_normalization_alignment() {
         let tick = TickSnapshot {
             price: 0.0,
-            db2_a1: 1.41421356,
+            db2_a1: std::f64::consts::SQRT_2,
             ..Default::default()
         };
 
