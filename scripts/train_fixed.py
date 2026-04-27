@@ -38,12 +38,18 @@ def load_data_from_csv(csv_path):
     
     df = pd.read_csv(csv_path, header=None, on_bad_lines='skip')
     
+    # STRICT SANITIZATION BARRIER (Linear Time-Series Level)
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    df.dropna(inplace=True)
+    df.reset_index(drop=True, inplace=True) # Reset index to ensure contiguous rolling windows
+
     if df.shape[1] >= 3:
         prices = df.iloc[:, 2].values
     else:
         prices = df.iloc[:, 1].values
         
     prices = pd.to_numeric(prices, errors='coerce')
+    # Final pass to ensure no NaN remained after coercion
     prices = prices[~np.isnan(prices)]
     return prices.astype(np.float32)
 
@@ -117,27 +123,6 @@ def main(csv_path: str = None, log_dir: str = None):
 
     logger.info("Preparing features...")
     x_all, y_dir_all, y_vol_all = prepare_features(prices, seq_len=seq_len)
-
-    # STRICT SANITIZATION BARRIER (Pandas Level)
-    # Convert to 2D for pandas processing
-    N, S, F = x_all.shape
-    features = pd.DataFrame(x_all.numpy().reshape(N, S * F))
-    targets = pd.DataFrame(torch.cat([y_dir_all, y_vol_all], dim=1).numpy())
-
-    df_combined = pd.concat([features, targets], axis=1)
-    df_combined.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df_combined.dropna(inplace=True)
-    
-    if df_combined.empty:
-        raise ValueError("CRITICAL: Dataset became empty after dropping NaNs/Infs.")
-        
-    features = df_combined.iloc[:, :features.shape[1]]
-    targets = df_combined.iloc[:, features.shape[1]:]
-
-    # Convert back to tensors
-    x_all = torch.tensor(features.values.reshape(-1, S, F), dtype=torch.float32)
-    y_dir_all = torch.tensor(targets.values[:, 0], dtype=torch.float32).unsqueeze(1)
-    y_vol_all = torch.tensor(targets.values[:, 1], dtype=torch.float32).unsqueeze(1)
 
     split = int(len(x_all) * 0.8)
     train_ds = TensorDataset(x_all[:split], y_dir_all[:split], y_vol_all[:split])
