@@ -637,6 +637,7 @@ Examples:
         elif args.mode == "both":
             await service.collect_backfill(target_count=args.count)
             if not service.shutdown_event.is_set():
+                logger.info("Transitioning to LIVE subscription as requested by 'both' mode.")
                 service._flush_task = asyncio.create_task(service._flush_buffer_task())
                 await service.run_live()
     finally:

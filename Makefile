@@ -62,8 +62,9 @@ export:
 collect:
 	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
 	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-R_100}}; \
-	echo "Collecting ticks for symbol: $$TARGET_SYMBOL"; \
-	$(PYTHON) scripts/tick_collector.py --symbol $$TARGET_SYMBOL --mode both
+	TARGET_MODE=$${MODE:-backfill}; \
+	echo "Collecting ticks for symbol: $$TARGET_SYMBOL (Mode: $$TARGET_MODE)"; \
+	$(PYTHON) scripts/tick_collector.py --symbol $$TARGET_SYMBOL --mode $$TARGET_MODE
 
 consolidate:
 	$(PYTHON) consolidate_project_sources.py
