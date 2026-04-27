@@ -131,147 +131,154 @@ def main(csv_path: str = None, log_dir: str = None):
     model = SimpleTransformerV2(input_dim=input_dim, max_seq_len=seq_len).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
 
-    # Phase 1: Contrastive Pre-training (TS2Vec)
-    logger.info("Starting Phase 1: TS2Vec Contrastive Pre-training...")
-    for epoch in range(5):
-        model.train()
-        total_loss = 0
-        pbar = tqdm(train_loader, desc=f"Phase 1 - Epoch {epoch+1}/5", leave=False)
-        for bx, _, _ in pbar:
-            bx = bx.to(device)
-            optimizer.zero_grad()
-            # Random crop could be added, but applying temporal masking in latent space is key:
-            f1 = model(bx, return_feat=True, apply_ts2vec_mask=True, mask_p=0.5)
-            f2 = model(bx, return_feat=True, apply_ts2vec_mask=True, mask_p=0.5)
-            loss = contrastive_loss(f1, f2, temperature=0.1)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
-        logger.info(f"Phase 1 Epoch {epoch+1}, Avg Loss: {total_loss/len(train_loader):.4f}")
-
-    # Phase 2: Supervised Fine-tuning
-    logger.info("Starting Phase 2: Supervised Fine-tuning with MTL...")
-    
-    # Freeze encoder layers except the heads initially or use low-LR
-    # Using low-LR approach for the whole model to simplify, as per "frozen/low-LR encoder"
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
-    
-    warmup_epochs = 5
-    def lr_lambda(epoch):
-        return (epoch + 1) / warmup_epochs if epoch < warmup_epochs else 1.0
-    warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
-    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
-    
-    use_amp = device.type == 'cuda'
-    scaler = torch.amp.GradScaler('cuda') if use_amp else None
-    
-    num_pos = torch.sum(y_dir_all[:split]).item()
-    if num_pos == 0:
-        logger.warning("No positive labels found in training split. Setting pos_weight to 1.0.")
-        pos_weight = 1.0
-    else:
-        pos_weight = (split - num_pos) / num_pos
-    
-    pos_weight_t = torch.tensor([pos_weight], dtype=torch.float32, device=device)
-
-    early_stop_patience = 5
-    patience_counter = 0
-    best_auc = 0.0
-    
-    for epoch in range(20):
-        model.train()
-        total_grad_norm = 0.0
-        num_batches = len(train_loader)
-        
-        pbar = tqdm(train_loader, desc=f"Phase 2 - Epoch {epoch+1}/20", leave=False)
-        for bx, by_dir, by_vol in pbar:
-            bx, by_dir, by_vol = bx.to(device), by_dir.to(device), by_vol.to(device)
-            optimizer.zero_grad()
-            
-            # 1. Forward pass happens in fast float16
-            with (torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()):
-                out_dir, out_vol = model(bx)
-
-            # 2. Exit autocast context and compute loss in stable float32
-            out_dir_f32 = out_dir.float()
-            out_vol_f32 = out_vol.float()
-
-            l_dir = focal_loss(out_dir_f32, by_dir.float(), pos_weight_t)
-            l_vol = nn.functional.huber_loss(out_vol_f32, by_vol.float())
-            loss = l_dir + 0.2 * l_vol
-
-            # 3. Backward pass scales the gradients back down safely
-            if scaler:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
+    try:
+        # Phase 1: Contrastive Pre-training (TS2Vec)
+        logger.info("Starting Phase 1: TS2Vec Contrastive Pre-training...")
+        for epoch in range(5):
+            model.train()
+            total_loss = 0
+            pbar = tqdm(train_loader, desc=f"Phase 1 - Epoch {epoch+1}/5", leave=False)
+            for bx, _, _ in pbar:
+                bx = bx.to(device)
+                optimizer.zero_grad()
+                # Random crop could be added, but applying temporal masking in latent space is key:
+                f1 = model(bx, return_feat=True, apply_ts2vec_mask=True, mask_p=0.5)
+                f2 = model(bx, return_feat=True, apply_ts2vec_mask=True, mask_p=0.5)
+                loss = contrastive_loss(f1, f2, temperature=0.1)
                 loss.backward()
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
-                
-            total_grad_norm += grad_norm.item()
-            pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
-            
-            # Log batch loss
-            step = epoch * num_batches + pbar.n
-            writer.add_scalar("Loss/Batch", loss.item(), step)
-            writer.add_scalar("GradNorm/Batch", grad_norm.item(), step)
+                total_loss += loss.item()
+                pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+            logger.info(f"Phase 1 Epoch {epoch+1}, Avg Loss: {total_loss/len(train_loader):.4f}")
 
-        model.eval()
-        v_probs, v_targets = [], []
-        with torch.no_grad():
-            for bx, by_dir, _ in val_loader:
-                out_dir, _ = model(bx.to(device))
-                v_probs.append(out_dir)
-                v_targets.append(by_dir)
-        
-        vp = torch.cat(v_probs).cpu().numpy().flatten()
-        vt = torch.cat(v_targets).cpu().numpy().flatten()
+        # Phase 2: Supervised Fine-tuning
+        logger.info("Starting Phase 2: Supervised Fine-tuning with MTL...")
 
-        vpb = vp > 0.5
-        acc = accuracy_score(vt, vpb)
-        f1 = f1_score(vt, vpb, zero_division=0)
-        
-        try:
-            auc_val = roc_auc_score(vt, vp)
-            p, r, _ = precision_recall_curve(vt, vp)
-            prauc_val = pr_auc(r, p)
-        except ValueError:
-            auc_val, prauc_val = 0.5, 0.0
-            
-        avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0.0
+        # Freeze encoder layers except the heads initially or use low-LR
+        # Using low-LR approach for the whole model to simplify, as per "frozen/low-LR encoder"
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.01)
 
-        if epoch < warmup_epochs:
-            warmup_scheduler.step()
+        warmup_epochs = 5
+        def lr_lambda(epoch):
+            return (epoch + 1) / warmup_epochs if epoch < warmup_epochs else 1.0
+        warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
+
+        use_amp = device.type == 'cuda'
+        scaler = torch.amp.GradScaler('cuda') if use_amp else None
+
+        num_pos = torch.sum(y_dir_all[:split]).item()
+        if num_pos == 0:
+            logger.warning("No positive labels found in training split. Setting pos_weight to 1.0.")
+            pos_weight = 1.0
         else:
-            plateau_scheduler.step(auc_val)
+            pos_weight = (split - num_pos) / num_pos
 
-        logger.info(
-            f"Phase 2 Epoch {epoch+1}, AUC: {auc_val:.4f}, PR-AUC: {prauc_val:.4f}, Acc: {acc:.4f}, F1: {f1:.4f}, "
-            f"LR: {optimizer.param_groups[0]['lr']:.6f}, GradNorm: {avg_grad_norm:.4f}"
-        )
+        pos_weight_t = torch.tensor([pos_weight], dtype=torch.float32, device=device)
 
-        # Log epoch metrics
-        writer.add_scalar("Metrics/AUC", auc_val, epoch)
-        writer.add_scalar("Metrics/PR-AUC", prauc_val, epoch)
-        writer.add_scalar("Metrics/Accuracy", acc, epoch)
-        writer.add_scalar("Metrics/F1", f1, epoch)
-        writer.add_scalar("Optimization/LearningRate", optimizer.param_groups[0]['lr'], epoch)
-        writer.add_scalar("Optimization/AvgGradNorm", avg_grad_norm, epoch)
+        early_stop_patience = 5
+        patience_counter = 0
+        best_auc = 0.0
 
-        if auc_val > best_auc:
-            best_auc = auc_val
-            torch.save(model.state_dict(), "best_model.pth")
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= early_stop_patience:
-                logger.info(f"Early stopping triggered at epoch {epoch+1}")
-                break
+        for epoch in range(20):
+            model.train()
+            total_grad_norm = 0.0
+            num_batches = len(train_loader)
+
+            pbar = tqdm(train_loader, desc=f"Phase 2 - Epoch {epoch+1}/20", leave=False)
+            for bx, by_dir, by_vol in pbar:
+                bx, by_dir, by_vol = bx.to(device), by_dir.to(device), by_vol.to(device)
+                optimizer.zero_grad()
+
+                # 1. Forward pass happens in fast float16
+                with (torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()):
+                    out_dir, out_vol = model(bx)
+
+                # 2. Exit autocast context and compute loss in stable float32
+                out_dir_f32 = out_dir.float()
+                out_vol_f32 = out_vol.float()
+
+                l_dir = focal_loss(out_dir_f32, by_dir.float(), pos_weight_t)
+                l_vol = nn.functional.huber_loss(out_vol_f32, by_vol.float())
+                loss = l_dir + 0.2 * l_vol
+
+                # 3. Backward pass scales the gradients back down safely
+                if scaler:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+
+                total_grad_norm += grad_norm.item()
+                pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+
+                # Log batch loss
+                step = epoch * num_batches + pbar.n
+                writer.add_scalar("Loss/Batch", loss.item(), step)
+                writer.add_scalar("GradNorm/Batch", grad_norm.item(), step)
+
+            model.eval()
+            v_probs, v_targets = [], []
+            with torch.no_grad():
+                for bx, by_dir, _ in val_loader:
+                    out_dir, _ = model(bx.to(device))
+                    v_probs.append(out_dir)
+                    v_targets.append(by_dir)
+
+            vp = torch.cat(v_probs).cpu().numpy().flatten()
+            vt = torch.cat(v_targets).cpu().numpy().flatten()
+
+            vpb = vp > 0.5
+            acc = accuracy_score(vt, vpb)
+            f1 = f1_score(vt, vpb, zero_division=0)
+
+            try:
+                auc_val = roc_auc_score(vt, vp)
+                p, r, _ = precision_recall_curve(vt, vp)
+                prauc_val = pr_auc(r, p)
+            except ValueError:
+                auc_val, prauc_val = 0.5, 0.0
+
+            avg_grad_norm = total_grad_norm / num_batches if num_batches > 0 else 0.0
+
+            if epoch < warmup_epochs:
+                warmup_scheduler.step()
+            else:
+                plateau_scheduler.step(auc_val)
+
+            logger.info(
+                f"Phase 2 Epoch {epoch+1}, AUC: {auc_val:.4f}, PR-AUC: {prauc_val:.4f}, Acc: {acc:.4f}, F1: {f1:.4f}, "
+                f"LR: {optimizer.param_groups[0]['lr']:.6f}, GradNorm: {avg_grad_norm:.4f}"
+            )
+
+            # Log epoch metrics
+            writer.add_scalar("Metrics/AUC", auc_val, epoch)
+            writer.add_scalar("Metrics/PR-AUC", prauc_val, epoch)
+            writer.add_scalar("Metrics/Accuracy", acc, epoch)
+            writer.add_scalar("Metrics/F1", f1, epoch)
+            writer.add_scalar("Optimization/LearningRate", optimizer.param_groups[0]['lr'], epoch)
+            writer.add_scalar("Optimization/AvgGradNorm", avg_grad_norm, epoch)
+
+            if auc_val > best_auc:
+                best_auc = auc_val
+                torch.save(model.state_dict(), "best_model.pth")
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= early_stop_patience:
+                    logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                    break
+
+    except Exception as e:
+        logger.error(f"Training failed: {e}")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise e
 
     # Export to ONNX (Static Execution Graphs)
     try:

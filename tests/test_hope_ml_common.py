@@ -11,7 +11,7 @@ from hope_ml.common import focal_loss, contrastive_loss, ts2vec_mask, prepare_fe
 
 class TestHopeMlCommon(unittest.TestCase):
     def test_focal_loss_returns_nonnegative_scalar(self):
-        output = torch.sigmoid(torch.randn(16, 1))
+        output = torch.randn(16, 1) * 5.0
         target = torch.randint(0, 2, (16, 1)).float()
         pos_weight = torch.tensor(1.5)
         loss = focal_loss(output, target, pos_weight)
