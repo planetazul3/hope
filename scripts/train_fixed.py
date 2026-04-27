@@ -38,15 +38,13 @@ def load_data_from_csv(csv_path):
     
     df = pd.read_csv(csv_path, header=None, on_bad_lines='skip')
     
-    # Check if the first row is a header (e.g., contains 'quote') and drop it
-    if str(df.iloc[0, -1]).strip().lower() == 'quote':
-        df = df.iloc[1:].reset_index(drop=True)
-        
     if df.shape[1] >= 3:
         prices = df.iloc[:, 2].values
     else:
         prices = df.iloc[:, 1].values
         
+    prices = pd.to_numeric(prices, errors='coerce')
+    prices = prices[~np.isnan(prices)]
     return prices.astype(np.float32)
 
 def generate_ed25519_keypair_and_sign(model_path):
@@ -191,13 +189,19 @@ def main(csv_path: str = None, log_dir: str = None):
             bx, by_dir, by_vol = bx.to(device), by_dir.to(device), by_vol.to(device)
             optimizer.zero_grad()
             
+            # 1. Forward pass happens in fast float16
             with (torch.amp.autocast('cuda') if use_amp else contextlib.nullcontext()):
                 out_dir, out_vol = model(bx)
-                l_dir = focal_loss(out_dir, by_dir, pos_weight_t)
-                # Continuous 10-tick forward MSE/Huber Loss:
-                l_vol = nn.functional.huber_loss(out_vol, by_vol)
-                loss = l_dir + 0.2 * l_vol
-            
+
+            # 2. Exit autocast context and compute loss in stable float32
+            out_dir_f32 = out_dir.float()
+            out_vol_f32 = out_vol.float()
+
+            l_dir = focal_loss(out_dir_f32, by_dir.float(), pos_weight_t)
+            l_vol = nn.functional.huber_loss(out_vol_f32, by_vol.float())
+            loss = l_dir + 0.2 * l_vol
+
+            # 3. Backward pass scales the gradients back down safely
             if scaler:
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)

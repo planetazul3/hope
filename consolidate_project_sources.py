@@ -18,14 +18,12 @@ Features:
 import argparse
 import fnmatch
 import logging
-import mimetypes
 import os
 import re
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set, Optional
+from typing import List, Set
 
 # ═══════════════════════════════════════════════════════════════
 # Configuration & Metadata
@@ -228,7 +226,7 @@ class ProjectConsolidator:
         
         with open(output_path, "w", encoding="utf-8") as out:
             # Write global header
-            out.write(f"<!-- PROJECT CONSOLIDATION SNAPSHOT -->\n")
+            out.write("<!-- PROJECT CONSOLIDATION SNAPSHOT -->\n")
             out.write(f"<!-- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -->\n")
             out.write(f"<!-- Git Revision: {git_rev} -->\n\n")
             
@@ -265,7 +263,7 @@ class ProjectConsolidator:
                         stat = fpath.stat()
                         out.write(f'<file path="{rel_path}" type="database" size="{stat.st_size}">\n')
                         out.write(f"<!-- Database content omitted. Type: {fpath.suffix} -->\n")
-                        out.write(f"</file>\n\n")
+                        out.write("</file>\n\n")
                         logger.info(f"💾 {rel_path} (Database)")
                         continue
 
@@ -273,8 +271,8 @@ class ProjectConsolidator:
                     if self.is_sensitive_file(fpath):
                         self.stats["sensitive"] += 1
                         out.write(f'<file path="{rel_path}" type="sensitive">\n')
-                        out.write(f"<!-- Sensitive content omitted for security. -->\n")
-                        out.write(f"</file>\n\n")
+                        out.write("<!-- Sensitive content omitted for security. -->\n")
+                        out.write("</file>\n\n")
                         logger.info(f"🔒 {rel_path} (Sensitive)")
                         continue
 
@@ -298,7 +296,7 @@ class ProjectConsolidator:
                             out.write(content)
                             if is_truncated:
                                 out.write("\n\n[... CONTENT TRUNCATED ...]\n")
-                            out.write(f"\n</file>\n\n")
+                            out.write("\n</file>\n\n")
                             
                             self.stats["included"] += 1
                             self.stats["total_lines"] += content.count("\n")
