@@ -54,13 +54,13 @@ restore-nb:
 	@echo "Notebooks restored. Run 'git add notebooks/' to commit."
 
 export:
-	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
+	@_SYMBOL=$$(sed -n 's/^DERIV_SYMBOL=\([^#[:space:]]*\).*/\1/p' .env 2>/dev/null); \
 	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-R_100}}; \
 	echo "Exporting ticks for symbol: $$TARGET_SYMBOL"; \
 	$(PYTHON) scripts/export_db.py --symbol $$TARGET_SYMBOL --incremental --validate
 
 collect:
-	@_SYMBOL=$$(grep '^DERIV_SYMBOL=' .env 2>/dev/null | cut -d= -f2 | tr -d ' "' | tr -d '\r'); \
+	@_SYMBOL=$$(sed -n 's/^DERIV_SYMBOL=\([^#[:space:]]*\).*/\1/p' .env 2>/dev/null); \
 	TARGET_SYMBOL=$${SYMBOL:-$${_SYMBOL:-R_100}}; \
 	TARGET_MODE=$${MODE:-backfill}; \
 	echo "Collecting ticks for symbol: $$TARGET_SYMBOL (Mode: $$TARGET_MODE)"; \

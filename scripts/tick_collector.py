@@ -16,8 +16,27 @@ try:
     import websockets
     from websockets.exceptions import ConnectionClosed, WebSocketException
 except ImportError:
-    logger.info("ERROR: websockets not installed. Run: pip install websockets", file=sys.stderr)
+    print("ERROR: websockets not installed. Run: pip install websockets", file=sys.stderr)
     sys.exit(1)
+
+def load_env_file(path=".env"):
+    """Minimal .env loader to ensure scripts are self-sufficient."""
+    if not os.path.exists(path):
+        return
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                # Strip inline comments
+                v = v.split("#", 1)[0].strip().strip("\"").strip("'")
+                k = k.strip()
+                if k not in os.environ:
+                    os.environ[k] = v
+
+load_env_file()
 
 # --- Configuration & Constants ---
 
@@ -600,7 +619,7 @@ Examples:
   python3 scripts/tick_collector.py --symbol R_100 --mode both --log-level DEBUG
         """,
     )
-    parser.add_argument("--symbol", default=os.environ.get("DERIV_SYMBOL", "1HZ100V"), help="Deriv symbol (default: 1HZ100V or DERIV_SYMBOL env)")
+    parser.add_argument("--symbol", default=os.environ.get("DERIV_SYMBOL"), help="Deriv symbol (overrides .env)")
     parser.add_argument("--db", default="data/tick_store.db", help="SQLite path (default: data/tick_store.db)")
     parser.add_argument("--mode", choices=["history", "backfill", "live", "both", "list"], default="history")
     parser.add_argument("--hours", type=float, help="History window in hours")
@@ -615,9 +634,10 @@ Examples:
 
     logging.getLogger().setLevel(getattr(logging, args.log_level))
 
+    symbol = args.symbol or os.environ.get("DERIV_SYMBOL", "1HZ100V")
     client = DerivClient(DEFAULT_APP_ID)
     store = TickStore(args.db)
-    service = CollectionService(client, store, args.symbol)
+    service = CollectionService(client, store, symbol)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
