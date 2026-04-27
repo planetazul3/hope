@@ -1,5 +1,4 @@
 import os
-import sys
 import torch
 import torch.nn as nn
 import numpy as np
@@ -8,7 +7,7 @@ import logging
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.tensorboard import SummaryWriter
-from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, precision_score, recall_score
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 from torch.optim.lr_scheduler import LambdaLR
 from sklearn.metrics import precision_recall_curve, auc as pr_auc
 import random as _random
@@ -85,12 +84,14 @@ def main(csv_path: str = None, log_dir: str = None):
     writer = SummaryWriter(log_dir=log_dir)
     logger.info(f"TensorBoard logging to: {log_dir}")
     if csv_path is None:
+        symbol = os.environ.get("DERIV_SYMBOL", "1HZ100V")
+        file_name = f"{symbol}_ticks.csv"
         fallbacks = [
-            "/kaggle/input/ticks-csv/ticks.csv",
-            "/kaggle/working/hope/data/ticks.csv",
-            "/content/hope/data/ticks.csv",
-            "/content/drive/MyDrive/hope/data/ticks.csv",
-            "data/ticks.csv"
+            f"/kaggle/input/ticks-csv/{file_name}",
+            f"/kaggle/working/hope/data/{file_name}",
+            f"/content/hope/data/{file_name}",
+            f"/content/drive/MyDrive/hope/data/{file_name}",
+            f"data/{file_name}"
         ]
         for path in fallbacks:
             if os.path.exists(path):
@@ -98,7 +99,9 @@ def main(csv_path: str = None, log_dir: str = None):
                 break
         
     if csv_path is None:
-        csv_path = "data/ticks.csv" # Final default
+        # Final default fallback if nothing exists yet
+        symbol = os.environ.get("DERIV_SYMBOL", "1HZ100V")
+        csv_path = f"data/{symbol}_ticks.csv" 
         
     seq_len = int(os.environ.get("TRANSFORMER_SEQUENCE_LENGTH", 32))
     input_dim = 8
@@ -286,7 +289,7 @@ def main(csv_path: str = None, log_dir: str = None):
         torch.onnx.export(infer_model, dummy, onnx_path, export_params=True, opset_version=15,
                           do_constant_folding=True, input_names=['input'], output_names=['output'])
         logger.info(f"Exported {onnx_path} (Static Graph: 1x32x8)")
-    except Exception as e:
+    except Exception:
         logger.error(f"Failed to export ONNX: {traceback.format_exc()}")
         return
 
