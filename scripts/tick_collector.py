@@ -424,7 +424,7 @@ class CollectionService:
             f"Starting BACKFILL for {self.symbol} from "
             f"{datetime.fromtimestamp(last_epoch)}"
         )
-        start = last_epoch + 0.001  # avoid re-fetching last stored tick
+        start = int(last_epoch) + 1  # avoid re-fetching last stored tick
 
         while not self.shutdown_event.is_set():
             try:
@@ -470,7 +470,7 @@ class CollectionService:
                 break
 
             # Update start just after the last tick we processed
-            start = newest + 0.001
+            start = int(newest) + 1
             await self._sleep(RATE_LIMIT_SLEEP)
 
         self.stats.log(self.symbol)
