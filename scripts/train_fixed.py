@@ -46,7 +46,7 @@ def generate_ed25519_keypair_and_sign(model_path):
     try:
         signing_key_hex = os.environ.get("MODEL_SIGNING_KEY")
         if not signing_key_hex:
-            logger.warning("MODEL_SIGNING_KEY not found in environment. Skipping Ed25519 signature generation.")
+            logger.warning("MODEL_SIGNING_KEY not found. Skipping Ed25519 signature.")
             return
 
         from cryptography.hazmat.primitives.asymmetric import ed25519
