@@ -146,6 +146,26 @@ def prepare_features(prices, seq_len=32):
     y_dir_tensor = torch.from_numpy(np.array(y_dir, dtype=np.float32)).unsqueeze(1)
     y_vol_tensor = torch.from_numpy(np.array(y_vol, dtype=np.float32)).unsqueeze(1)
 
+    # STRICT SANITIZATION BARRIER: Purge all NaNs and Infs
+    initial_samples = x_tensor.shape[0]
+    
+    # Create a boolean mask of valid (finite) samples
+    valid_x = torch.isfinite(x_tensor).all(dim=(1, 2))
+    valid_y_dir = torch.isfinite(y_dir_tensor).squeeze(-1)
+    valid_y_vol = torch.isfinite(y_vol_tensor).squeeze(-1)
+    
+    valid_mask = valid_x & valid_y_dir & valid_y_vol
+    
+    # Apply mask to purge corrupted edge cases
+    x_tensor = x_tensor[valid_mask]
+    y_dir_tensor = y_dir_tensor[valid_mask]
+    y_vol_tensor = y_vol_tensor[valid_mask]
+    
+    if x_tensor.shape[0] == 0:
+        raise ValueError("CRITICAL: Dataset became empty after dropping NaNs/Infs.")
+        
+    logging.info(f"Sanitization purged {initial_samples - x_tensor.shape[0]} invalid samples.")
+
     n_samples = x_tensor.shape[0]
     pos_ratio = float(torch.sum(y_dir_tensor) / n_samples) * 100
     logging.info(f"prepare_features: shape={tuple(x_tensor.shape)}, samples={n_samples}, class_balance={pos_ratio:.2f}% positive")
@@ -168,6 +188,7 @@ def contrastive_loss(feat1, feat2, temperature=0.1):
     return (loss1 + loss2) / 2.0
 
 def focal_loss(output_logits, target, pos_weight=None, gamma=2.0, smoothing=0.05):
+    target = target.view_as(output_logits).float()
     target_smooth = target * (1 - smoothing) + 0.5 * smoothing
     bce_loss = nn.functional.binary_cross_entropy_with_logits(output_logits, target_smooth, reduction='none')
     probs = torch.sigmoid(output_logits)
