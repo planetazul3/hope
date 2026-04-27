@@ -386,6 +386,10 @@ def main(csv_path: str = None, log_dir: str = None):
             logger.info(f"Replaced {onnx_path} with quantized model.")
         except ImportError:
             logger.warning("ONNX quantization skipped (onnxruntime not installed)")
+        except Exception as q_err:
+            # Catch the shape inference error gracefully
+            logger.warning(f"INT8 Quantization skipped due to ONNX runtime limits: {q_err}")
+            logger.info("Proceeding with standard FP32 ONNX model (Recommended for Rust/Tract).")
             
         # Cryptographic Model Signing
         generate_ed25519_keypair_and_sign(onnx_path)
