@@ -600,7 +600,7 @@ Examples:
   python3 scripts/tick_collector.py --symbol R_100 --mode both --log-level DEBUG
         """,
     )
-    parser.add_argument("--symbol", default="1HZ100V", help="Deriv symbol (default: 1HZ100V)")
+    parser.add_argument("--symbol", default=os.environ.get("DERIV_SYMBOL", "1HZ100V"), help="Deriv symbol (default: 1HZ100V or DERIV_SYMBOL env)")
     parser.add_argument("--db", default="data/tick_store.db", help="SQLite path (default: data/tick_store.db)")
     parser.add_argument("--mode", choices=["history", "backfill", "live", "both", "list"], default="history")
     parser.add_argument("--hours", type=float, help="History window in hours")

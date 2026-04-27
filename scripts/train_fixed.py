@@ -95,7 +95,7 @@ def main(csv_path: str = None):
     if csv_path is None:
         csv_path = "data/ticks.csv" # Final default
         
-    seq_len = 32
+    seq_len = int(os.environ.get("TRANSFORMER_SEQUENCE_LENGTH", 32))
     input_dim = 8
 
     prices = load_data_from_csv(csv_path)

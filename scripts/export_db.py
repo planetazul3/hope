@@ -264,7 +264,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Advanced Deriv tick exporter")
     parser.add_argument("--db", default="data/tick_store.db", help="SQLite DB path")
     parser.add_argument("--csv", default="data/ticks.csv", help="Output CSV path")
-    parser.add_argument("--symbol", help="Filter by symbol")
+    parser.add_argument("--symbol", default=os.environ.get("DERIV_SYMBOL"), help="Filter by symbol")
     parser.add_argument("--hours", type=float, help="Export last N hours of data")
     parser.add_argument("--start", type=float, help="Start epoch")
     parser.add_argument("--end", type=float, help="End epoch")
