@@ -1,26 +1,30 @@
-"""Migration: Fix UNIQUE constraint from (symbol,epoch,quote) to (symbol,epoch)."""
-import sqlite3
+"""One‑time migration: enforce UNIQUE(symbol, epoch)."""
+import logging
 import sys
 import os
-import logging
+import sqlite3
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-def migrate(db_path):
+def migrate(db_path: str) -> None:
     if not os.path.exists(db_path):
-        logger.error(f"DB not found: {db_path}")
+        logger.error("DB not found: %s", db_path)
         sys.exit(1)
-        
-    logger.info(f"Connecting to database: {db_path}")
+
     conn = sqlite3.connect(db_path)
-    
-    # Enforce architectural standards for SQLite I/O
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    
-    logger.info("Migrating UNIQUE constraint to (symbol, epoch)...")
+
     try:
+        # Check if old schema still exists
+        cursor = conn.execute("PRAGMA index_list(ticks)")
+        indexes = [row[1] for row in cursor.fetchall()]
+        if "idx_symbol_epoch" in indexes:
+            logger.info("Migration already applied. Nothing to do.")
+            return
+
+        logger.info("Migrating UNIQUE constraint to (symbol, epoch)...")
         conn.executescript("""
             CREATE TABLE ticks_new (
                 id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,9 +41,9 @@ def migrate(db_path):
         """)
         conn.commit()
         count = conn.execute("SELECT COUNT(*) FROM ticks").fetchone()[0]
-        logger.info(f"Migration complete. {count} rows retained.")
-    except Exception as e:
-        logger.error(f"Migration failed: {e}")
+        logger.info("Migration complete. %d rows retained.", count)
+    except Exception:
+        logger.exception("Migration failed")
         conn.rollback()
     finally:
         conn.close()
