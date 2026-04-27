@@ -168,8 +168,7 @@ impl ProbabilityModel for TransformerModel {
                     data_buffer[base + 3] = (tick.ticks_since_reversal as f32).ln_1p();
                     data_buffer[base + 4] = tick.volatility as f32;
 
-                    let safe_price = if tick.price == 0.0 { 1e-8 } else { tick.price };
-                    let a1_norm = (tick.db2_a1 / (safe_price + 1e-8_f64)) as f32;
+                    let a1_norm = (tick.db2_a1 / (tick.price + 1e-8_f64)) as f32;
                     data_buffer[base + 5] = a1_norm;
                     data_buffer[base + 6] = tick.db2_d1 as f32;
                     data_buffer[base + 7] = tick.vol_ratio as f32;

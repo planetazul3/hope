@@ -11,7 +11,7 @@ Project `hope` operates as a long-running trading engine. Two critical issues we
 ## Decision
 1. **Engine State Persistence**:
     - Implement a `state.json` file in the project root to persist the `active_contract_id` and the current `TradingState`.
-    - The Rust engine will save its state on every critical transition (e.g., entering `InPosition`, `Recovery`, or `Cooldown`).
+    - The Rust engine will save its state on every transition attempt (even if the transition is rejected) to ensure disk/memory synchronization during complex recovery sequences.
     - On startup, the engine will attempt to load `state.json`. If an active contract is found, it will automatically resubscribe and transition to the appropriate state (usually `InPosition` or `Recovery`).
 2. **Buffered Tick Ingestion**:
     - Introduce a `write_buffer` in `tick_collector.py` for live mode.

@@ -146,6 +146,11 @@ struct ProposalRequest<'a> {
 }
 
 #[derive(Serialize)]
+struct PingRequest {
+    ping: u8,
+}
+
+#[derive(Serialize)]
 struct BuyRequest<'a> {
     buy: &'a str,
     price: f64,
@@ -340,8 +345,13 @@ impl DerivWebSocketClient {
             .context("failed to resubscribe to open contract")?;
         }
 
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+
         loop {
             tokio::select! {
+                _ = heartbeat.tick() => {
+                    self.send_json(&write_tx, &PingRequest { ping: 1 }).await?;
+                }
                 maybe_command = command_rx.recv() => {
                     let Some(command) = maybe_command else {
                         return Ok(());

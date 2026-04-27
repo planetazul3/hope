@@ -5,7 +5,11 @@ import sys
 import os
 import gzip
 from tqdm import tqdm
+import logging
 from datetime import datetime, timedelta
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
 def validate_data_streaming(chunk, last_states, expected_interval=1.0):
     """
@@ -204,8 +208,8 @@ def export_ticks(args):
         try:
             with tqdm(total=total_rows, desc="Exporting", unit="ticks") as pbar:
                 for chunk in chunk_iter:
-                    # CSV Export
-                    header = False 
+                    # CSV Export (Write header only if first chunk of a new file)
+                    header = (first_chunk and mode == 'w')
                     current_mode = mode if first_chunk else 'a'
                     chunk.to_csv(csv_path, index=False, header=header, mode=current_mode, compression=compression)
                     

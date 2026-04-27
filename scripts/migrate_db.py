@@ -25,7 +25,7 @@ def migrate(db_path):
             CREATE TABLE ticks_new (
                 id     INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT    NOT NULL,
-                epoch  REAL    NOT NULL,
+                epoch  INTEGER NOT NULL,
                 quote  REAL    NOT NULL,
                 UNIQUE(symbol, epoch)
             );

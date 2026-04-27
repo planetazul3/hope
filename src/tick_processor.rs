@@ -46,6 +46,7 @@ pub struct TickProcessor {
     sq_sum_returns: f64,
     long_sum_returns: f64,
     long_sq_sum_returns: f64,
+    push_count: u64,
 }
 
 const DB2_H: [f64; 4] = [
@@ -108,6 +109,7 @@ impl TickProcessor {
             sq_sum_returns: 0.0,
             long_sum_returns: 0.0,
             long_sq_sum_returns: 0.0,
+            push_count: 0,
         }
     }
 
@@ -202,6 +204,12 @@ impl TickProcessor {
             }
             self.long_sum_returns += current_return;
             self.long_sq_sum_returns += current_return.powi(2);
+
+            // Periodically recalculate to clear floating point drift
+            self.push_count += 1;
+            if self.push_count % 1000 == 0 {
+                self.recalculate_sums();
+            }
         }
 
         self.last_price = Some(price);
@@ -260,6 +268,36 @@ impl TickProcessor {
             *item = self.ring[idx];
         }
         count
+    }
+
+    fn recalculate_sums(&mut self) {
+        if self.len < 2 {
+            return;
+        }
+
+        // Short window
+        self.sum_returns = 0.0;
+        self.sq_sum_returns = 0.0;
+        let n_short = (self.len.saturating_sub(1)).min(Self::VOLATILITY_WINDOW);
+        for i in 0..n_short {
+            let idx_curr = (self.next_index + Self::CAPACITY - i - 1) % Self::CAPACITY;
+            let idx_prev = (self.next_index + Self::CAPACITY - i - 2) % Self::CAPACITY;
+            let ret = self.ring[idx_curr].price - self.ring[idx_prev].price;
+            self.sum_returns += ret;
+            self.sq_sum_returns += ret.powi(2);
+        }
+
+        // Long window
+        self.long_sum_returns = 0.0;
+        self.long_sq_sum_returns = 0.0;
+        let n_long = (self.len.saturating_sub(1)).min(Self::LONG_VOLATILITY_WINDOW);
+        for i in 0..n_long {
+            let idx_curr = (self.next_index + Self::CAPACITY - i - 1) % Self::CAPACITY;
+            let idx_prev = (self.next_index + Self::CAPACITY - i - 2) % Self::CAPACITY;
+            let ret = self.ring[idx_curr].price - self.ring[idx_prev].price;
+            self.long_sum_returns += ret;
+            self.long_sq_sum_returns += ret.powi(2);
+        }
     }
 }
 

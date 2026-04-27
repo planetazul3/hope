@@ -220,8 +220,9 @@ impl Engine {
     }
 
     fn transition(&mut self, next: TradingState) -> Result<()> {
-        self.fsm.transition(next)?;
+        let result = self.fsm.transition(next);
         self.save_state();
+        result?;
         Ok(())
     }
 

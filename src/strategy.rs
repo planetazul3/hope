@@ -128,6 +128,14 @@ where
             };
         }
 
+        // Explicit zero-volatility block to prevent AUD-006 bypass
+        if tick.volatility < 1e-9 {
+            return StrategyDecision {
+                probability_up,
+                signal: None,
+            };
+        }
+
         // Return-magnitude filter: avoid noise-induced false signals
         if tick.return_magnitude < tick.volatility * self.min_return_ratio {
             return StrategyDecision {

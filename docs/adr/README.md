@@ -29,3 +29,4 @@ This directory stores Architecture Decision Records (ADRs) for `hope`.
 - [0016 - Reliability and Performance Hardening](./0016-reliability-and-performance-hardening.md)
 - [0017 - Production Hardening via Canonical Transformer, TS2Vec, and Daubechies Wavelets](./0017-canonical-transformer-ts2vec.md)
 - [0018 - Persistent Engine State and Buffered Ingestion](./0018-persistent-engine-state-and-buffered-ingestion.md)
+- [0019 - Numerical Integrity and Math Parity Hardening](./0019-numerical-integrity-and-math-parity-hardening.md)
