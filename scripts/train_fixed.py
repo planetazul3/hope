@@ -49,13 +49,65 @@ def load_and_sanitize_data(csv_path, seq_len=32):
     df.dropna(subset=['quote'], inplace=True)
 
     # 1. FEATURE ENGINEERING (Generates NaNs at the edges)
-    df['log_ret'] = np.log(df['quote'] / df['quote'].shift(1))
-    df['volatility_20'] = df['log_ret'].rolling(window=20).std()
+    # Constants for DB2 (Daubechies-2) coefficients
+    DB2_H = [0.482962913144690, 0.836516303737469, 0.224143868041857, -0.129409522550921]
+    DB2_G = [-0.129409522550921, -0.224143868041857, 0.836516303737469, -0.482962913144690]
+
+    # Returns and Direction
+    df['diff'] = df['quote'].diff().fillna(0)
+    df['direction'] = np.sign(df['diff'])
+    
+    # Volatility (Short: 10, Long: 50) - Population std (ddof=0) for parity with Rust
+    df['vol_10'] = df['diff'].rolling(window=10).std(ddof=0)
+    df['vol_50'] = df['diff'].rolling(window=50).std(ddof=0)
+    df['vol_ratio'] = df['vol_10'] / (df['vol_50'] + 1e-8)
+    
+    # Return Ratio
+    df['return_ratio'] = df['diff'].abs() / (df['vol_10'] + 1e-8)
+    
+    # Streak and Ticks Since Reversal (Stateful engineering)
+    dir_vals = df['direction'].values
+    streaks = np.zeros(len(df))
+    reversals = np.zeros(len(df))
+    
+    last_streak = 0
+    last_dir = 0
+    last_trend_dir = 0
+    ticks_since_rev = 0
+    
+    for i in range(len(df)):
+        d = dir_vals[i]
+        # Streak
+        if d == 0: s = 0
+        elif d == last_dir: s = last_streak + 1
+        else: s = 1
+        streaks[i] = s
+        last_streak = s
+        last_dir = d
+        
+        # Reversal
+        if (d == 1 and last_trend_dir == -1) or (d == -1 and last_trend_dir == 1):
+            ticks_since_rev = 1
+        elif d != 0:
+            ticks_since_rev += 1
+        if d != 0:
+            last_trend_dir = d
+        reversals[i] = ticks_since_rev
+
+    df['log_streak'] = np.log1p(streaks)
+    df['log_reversal'] = np.log1p(reversals)
+    
+    # Daubechies-2 FIR Filters (4-tap)
+    df['db2_a1'] = (df['quote'] * DB2_H[0] + df['quote'].shift(1) * DB2_H[1] + 
+                    df['quote'].shift(2) * DB2_H[2] + df['quote'].shift(3) * DB2_H[3])
+    df['db2_d1'] = (df['quote'] * DB2_G[0] + df['quote'].shift(1) * DB2_G[1] + 
+                    df['quote'].shift(2) * DB2_G[2] + df['quote'].shift(3) * DB2_G[3])
+    df['db2_a1_norm'] = df['db2_a1'] / (df['quote'] + 1e-8)
 
     # Future targets (Generates NaNs at the end)
     df['target_quote_future'] = df['quote'].shift(-10)
     df['target_direction'] = np.where(df['target_quote_future'] > df['quote'], 1.0, 0.0)
-    df['target_volatility'] = df['volatility_20'].shift(-10)
+    df['target_volatility'] = df['vol_10'].shift(-10)
 
     # 2. STRICT SANITIZATION BARRIER (Pandas 2D Level)
     logger.info(f"Dimensions before sanitization: {df.shape}")
@@ -68,7 +120,12 @@ def load_and_sanitize_data(csv_path, seq_len=32):
         raise ValueError("CRITICAL: Dataset became empty after removing NaNs/Infs.")
 
     # 3. 3D SEQUENCE EXTRACTION (Preserving causality)
-    features = df[['quote', 'log_ret', 'volatility_20']].values
+    # The 8 Canonical Features
+    feature_cols = [
+        'direction', 'return_ratio', 'log_streak', 'log_reversal', 
+        'vol_10', 'db2_a1_norm', 'db2_d1', 'vol_ratio'
+    ]
+    features = df[feature_cols].values
     targets_dir = df['target_direction'].values
     targets_vol = df['target_volatility'].values
 
