@@ -7,6 +7,7 @@ import pandas as pd
 import logging
 from tqdm import tqdm
 from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score, precision_score, recall_score
 from torch.optim.lr_scheduler import LambdaLR
 from sklearn.metrics import precision_recall_curve, auc as pr_auc
@@ -77,8 +78,12 @@ def generate_ed25519_keypair_and_sign(model_path):
     except Exception as e:
         logger.error(f"Failed to generate Ed25519 signature: {e}")
 
-def main(csv_path: str = None):
+def main(csv_path: str = None, log_dir: str = None):
     # Path Agnosticism: Fallback detection for cloud environments
+    if log_dir is None:
+        log_dir = os.environ.get("LOG_DIR", "logs")
+    writer = SummaryWriter(log_dir=log_dir)
+    logger.info(f"TensorBoard logging to: {log_dir}")
     if csv_path is None:
         fallbacks = [
             "/kaggle/input/ticks-csv/ticks.csv",
@@ -196,6 +201,11 @@ def main(csv_path: str = None):
                 
             total_grad_norm += grad_norm.item()
             pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+            
+            # Log batch loss
+            step = epoch * num_batches + pbar.n
+            writer.add_scalar("Loss/Batch", loss.item(), step)
+            writer.add_scalar("GradNorm/Batch", grad_norm.item(), step)
 
         model.eval()
         v_probs, v_targets = [], []
@@ -230,6 +240,14 @@ def main(csv_path: str = None):
             f"Phase 2 Epoch {epoch+1}, AUC: {auc_val:.4f}, PR-AUC: {prauc_val:.4f}, Acc: {acc:.4f}, F1: {f1:.4f}, "
             f"LR: {optimizer.param_groups[0]['lr']:.6f}, GradNorm: {avg_grad_norm:.4f}"
         )
+
+        # Log epoch metrics
+        writer.add_scalar("Metrics/AUC", auc_val, epoch)
+        writer.add_scalar("Metrics/PR-AUC", prauc_val, epoch)
+        writer.add_scalar("Metrics/Accuracy", acc, epoch)
+        writer.add_scalar("Metrics/F1", f1, epoch)
+        writer.add_scalar("Optimization/LearningRate", optimizer.param_groups[0]['lr'], epoch)
+        writer.add_scalar("Optimization/AvgGradNorm", avg_grad_norm, epoch)
 
         if auc_val > best_auc:
             best_auc = auc_val
