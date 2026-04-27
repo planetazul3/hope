@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -28,6 +29,14 @@ use crate::{
 // - Integrated a high-fidelity TickProcessor with dynamic history buffering.
 // - Established multi-layered risk controls and rate limiting (ExecutionEngine).
 // - Synchronized trade state via typed OpenContract and BuyAccepted updates.
+
+const STATE_FILE: &str = "state.json";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SystemState {
+    active_contract_id: Option<u64>,
+    fsm_state: TradingState,
+}
 
 pub async fn run(config: AppConfig) -> Result<()> {
     let tick_logger = TickLogger::start(&config.tick_audit_log_path, 4096);
@@ -125,6 +134,25 @@ impl Engine {
             }),
         };
 
+        let mut fsm = TradingFsm::new();
+        let mut active_contract_id = None;
+
+        if !cfg!(test) {
+            if let Some(state) = Self::load_state() {
+                info!(?state, "recovered system state from disk");
+                active_contract_id = state.active_contract_id;
+                if let Some(id) = active_contract_id {
+                    tracked_contracts.write().insert(id);
+                }
+                if state.fsm_state != TradingState::Idle {
+                    if let Err(err) = fsm.transition(state.fsm_state) {
+                        warn!(error = %err, "failed to recover FSM state; resetting to recovery");
+                        let _ = fsm.transition(TradingState::Recovery);
+                    }
+                }
+            }
+        }
+
         Self {
             strategy: StrategyEngine::new(
                 config.probability_threshold,
@@ -137,10 +165,10 @@ impl Engine {
             execution: ExecutionEngine::new(config.min_api_interval, config.max_tick_latency),
             risk: RiskManager::new(config.max_consecutive_losses),
             tick_processor: TickProcessor::new(),
-            fsm: TradingFsm::new(),
+            fsm,
             cooldown_remaining: 0,
             pending_proposal: None,
-            active_contract_id: None,
+            active_contract_id,
             contract_started_at: None,
             order_sent_at: None,
             proposal_timeout: Duration::from_secs(config.proposal_timeout_secs),
@@ -165,6 +193,41 @@ impl Engine {
 
     fn next_req_id(&mut self) -> u32 {
         self.req_id_counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    fn save_state(&self) {
+        if cfg!(test) {
+            return;
+        }
+        let state = SystemState {
+            active_contract_id: self.active_contract_id,
+            fsm_state: self.fsm.state(),
+        };
+        if let Ok(json) = serde_json::to_string(&state) {
+            if let Err(err) = std::fs::write(STATE_FILE, json) {
+                error!(error = %err, "failed to save system state");
+            }
+        }
+    }
+
+    fn load_state() -> Option<SystemState> {
+        if let Ok(json) = std::fs::read_to_string(STATE_FILE) {
+            if let Ok(state) = serde_json::from_str::<SystemState>(&json) {
+                return Some(state);
+            }
+        }
+        None
+    }
+
+    fn transition(&mut self, next: TradingState) -> Result<()> {
+        self.fsm.transition(next)?;
+        self.save_state();
+        Ok(())
+    }
+
+    fn set_active_contract(&mut self, id: Option<u64>) {
+        self.active_contract_id = id;
+        self.save_state();
     }
 
     fn handle_event(
@@ -192,7 +255,7 @@ impl Engine {
                 if self.fsm.state() == TradingState::Cooldown {
                     self.cooldown_remaining = self.cooldown_remaining.saturating_sub(1);
                     if self.cooldown_remaining == 0 {
-                        self.fsm.transition(TradingState::Idle)?;
+                        self.transition(TradingState::Idle)?;
                     }
                     self.tick_logger.try_log(
                         snapshot,
@@ -218,7 +281,7 @@ impl Engine {
                                 // ADR 0008: Register forced clear as a loss to prevent risk manager bypass
                                 let _ = self.risk.on_trade_closed(-self.config.stake);
                             }
-                            self.active_contract_id = None;
+                            self.set_active_contract(None);
                             self.contract_started_at = None;
                             self.pending_subscription_req_id = None;
                             self.safe_reset();
@@ -290,7 +353,7 @@ impl Engine {
                         warn!(?reason, "buy skipped");
                         let probability_up = ready.probability_up;
                         self.pending_proposal = Some(ready);
-                        self.fsm.transition(TradingState::OrderPending)?;
+                        self.transition(TradingState::OrderPending)?;
                         self.tick_logger.try_log(
                             snapshot,
                             probability_up,
@@ -303,7 +366,7 @@ impl Engine {
 
                     self.pending_req_id = Some(req_id);
 
-                    self.fsm.transition(TradingState::OrderPending)?;
+                    self.transition(TradingState::OrderPending)?;
                     self.order_sent_at = Some(tick_started_at);
                     self.tick_logger.try_log(
                         snapshot,
@@ -359,7 +422,7 @@ impl Engine {
                     self.pending_req_id = Some(req_id);
                     self.pending_probability = Some(decision.probability_up);
 
-                    self.fsm.transition(TradingState::OrderPending)?;
+                    self.transition(TradingState::OrderPending)?;
                     self.order_sent_at = Some(tick_started_at);
                     self.tick_logger.try_log(
                         snapshot,
@@ -426,7 +489,7 @@ impl Engine {
                         });
                         if self.fsm.state() != TradingState::OrderPending {
                             self.safe_reset();
-                            let _ = self.fsm.transition(TradingState::OrderPending);
+                            let _ = self.transition(TradingState::OrderPending);
                         }
                     } else {
                         info!(proposal_id = %id, "immediate buy sent");
@@ -435,7 +498,7 @@ impl Engine {
                         self.pending_proposal = None;
                         if self.fsm.state() != TradingState::OrderPending {
                             self.safe_reset();
-                            let _ = self.fsm.transition(TradingState::OrderPending);
+                            let _ = self.transition(TradingState::OrderPending);
                         }
                     }
                 }
@@ -449,14 +512,14 @@ impl Engine {
                         return Ok(());
                     }
 
-                    self.active_contract_id = Some(contract_id);
+                    self.set_active_contract(Some(contract_id));
                     self.contract_started_at = Some(Instant::now());
                     self.pending_proposal = None;
                     self.order_sent_at = None;
                     self.pending_req_id = None;
                     self.pending_probability = None;
 
-                    self.fsm.transition(TradingState::InPosition)?;
+                    self.transition(TradingState::InPosition)?;
                     let sub_req_id = self.next_req_id();
                     self.pending_subscription_req_id = Some(sub_req_id);
                     if command_tx
@@ -511,8 +574,8 @@ impl Engine {
                                 contract_id = update.contract_id,
                                 "contract confirmed open; recovering to InPosition state"
                             );
-                            self.active_contract_id = Some(update.contract_id);
-                            let _ = self.fsm.transition(TradingState::InPosition);
+                            self.set_active_contract(Some(update.contract_id));
+                            let _ = self.transition(TradingState::InPosition);
                         }
                     }
                 }
@@ -527,7 +590,7 @@ impl Engine {
                 if req_id.is_some() && req_id == self.pending_req_id {
                     warn!("active request failed; transitioning to recovery");
                     if self.fsm.state() == TradingState::OrderPending {
-                        let _ = self.fsm.transition(TradingState::Recovery);
+                        let _ = self.transition(TradingState::Recovery);
                         self.pending_proposal = None;
                     } else {
                         self.safe_reset();
@@ -550,7 +613,7 @@ impl Engine {
                     if self.fsm.state() == TradingState::OrderPending
                         || self.fsm.state() == TradingState::InPosition
                     {
-                        let _ = self.fsm.transition(TradingState::Recovery);
+                        let _ = self.transition(TradingState::Recovery);
                     } else if self.fsm.state() != TradingState::Cooldown {
                         self.safe_reset();
                     }
@@ -600,7 +663,7 @@ impl Engine {
             );
         }
 
-        self.active_contract_id = None;
+        self.set_active_contract(None);
         self.contract_started_at = None;
         self.pending_subscription_req_id = None;
         self.tracked_contracts.write().remove(&contract_id);
@@ -608,9 +671,9 @@ impl Engine {
         if outcome.enter_cooldown {
             self.cooldown_remaining = self.config.cooldown_ticks;
             if self.fsm.state() != TradingState::Cooldown {
-                if self.fsm.transition(TradingState::Cooldown).is_err() {
+                if self.transition(TradingState::Cooldown).is_err() {
                     self.fsm.reset_to_idle();
-                    self.fsm.transition(TradingState::Cooldown)?;
+                    self.transition(TradingState::Cooldown)?;
                 }
             }
             warn!(
@@ -627,7 +690,7 @@ impl Engine {
 
     fn safe_reset(&mut self) {
         if self.fsm.state() != TradingState::Idle {
-            self.fsm.reset_to_idle();
+            let _ = self.transition(TradingState::Idle);
         }
         self.buffered_close_event = None;
     }

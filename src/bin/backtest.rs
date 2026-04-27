@@ -53,7 +53,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut strategy = StrategyEngine::new(
+    let strategy = StrategyEngine::new(
         config.probability_threshold,
         model,
         config.min_trend_length,

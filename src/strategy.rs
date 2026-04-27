@@ -8,7 +8,7 @@ use statrs::distribution::{ContinuousCDF, Normal};
 static STD_NORMAL: Lazy<Normal> = Lazy::new(|| Normal::new(0.0, 1.0).expect("valid params"));
 
 pub trait ProbabilityModel {
-    fn probability_up(&mut self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
+    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64;
 }
 
 const VOLATILITY_EPSILON: f64 = 1e-8;
@@ -20,7 +20,7 @@ pub struct GaussianModel {
 }
 
 impl ProbabilityModel for GaussianModel {
-    fn probability_up(&mut self, tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+    fn probability_up(&self, tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
         if tick.volatility <= 0.0 {
             return 0.5;
         }
@@ -43,7 +43,7 @@ pub enum AnyModel {
 }
 
 impl ProbabilityModel for AnyModel {
-    fn probability_up(&mut self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
+    fn probability_up(&self, tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
         match self {
             Self::Gaussian(m) => m.probability_up(tick, history),
             Self::Transformer(m) => m.probability_up(tick, history),
@@ -104,15 +104,18 @@ where
     }
 
     pub fn evaluate(
-        &mut self,
+        &self,
         tick: &TickSnapshot,
         history: &[TickSnapshot],
         state: TradingState,
     ) -> StrategyDecision {
-        // Strategy: 2 ticks in the same direction AND matches general trend (drift)
+        let probability_up = self.model.probability_up(tick, history);
+        let probability_down = 1.0 - probability_up;
+
+        // Base signal check: require Idle state and minimum streak
         if state != TradingState::Idle || tick.streak < 2 {
             return StrategyDecision {
-                probability_up: 0.5,
+                probability_up,
                 signal: None,
             };
         }
@@ -120,7 +123,7 @@ where
         // Trend-length filter: require sustained directional run
         if tick.ticks_since_reversal < self.min_trend_length {
             return StrategyDecision {
-                probability_up: 0.5,
+                probability_up,
                 signal: None,
             };
         }
@@ -128,13 +131,10 @@ where
         // Return-magnitude filter: avoid noise-induced false signals
         if tick.return_magnitude < tick.volatility * self.min_return_ratio {
             return StrategyDecision {
-                probability_up: 0.5,
+                probability_up,
                 signal: None,
             };
         }
-
-        let probability_up = self.model.probability_up(tick, history);
-        let probability_down = 1.0 - probability_up;
 
         // Task 8: Dynamic confidence threshold using fields
         let mut adjusted_threshold = self.threshold;
@@ -179,7 +179,7 @@ mod tests {
     struct VariableModel(f64);
 
     impl ProbabilityModel for VariableModel {
-        fn probability_up(&mut self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
+        fn probability_up(&self, _tick: &TickSnapshot, _history: &[TickSnapshot]) -> f64 {
             self.0
         }
     }
@@ -198,7 +198,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut strategy = StrategyEngine::new(0.55, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
+        let strategy = StrategyEngine::new(0.55, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         assert_eq!(decision.probability_up, 0.6);
@@ -219,10 +219,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut strategy = StrategyEngine::new(0.55, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
+        let strategy = StrategyEngine::new(0.55, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
-        assert_eq!(decision.probability_up, 0.5);
+        assert_eq!(decision.probability_up, 0.6);
         assert_eq!(decision.signal, None);
     }
 
@@ -243,7 +243,7 @@ mod tests {
         // Case 1: VariableModel(0.6) returns 0.6.
         // Base threshold 0.58. Adjusted is 0.63.
         // 0.6 >= 0.58 but 0.6 < 0.63. Should be None.
-        let mut strategy = StrategyEngine::new(0.58, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
+        let strategy = StrategyEngine::new(0.58, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
         assert_eq!(decision.signal, None);
 
@@ -272,7 +272,7 @@ mod tests {
         // Case: Base 0.51, Reward 0.05, Penalty 0.02.
         // Adjusted: 0.51 - 0.05 + 0.02 = 0.48.
         // Floor should clamp to 0.5.
-        let mut strategy = StrategyEngine::new(0.51, VariableModel(0.49), 5, 0.02, 0.05, 0.1);
+        let strategy = StrategyEngine::new(0.51, VariableModel(0.49), 5, 0.02, 0.05, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
 
         // Model returns 0.49. Since adjusted_threshold is 0.5, 0.49 < 0.5 -> No signal.

@@ -8,6 +8,7 @@ import time
 import signal
 import logging
 import random
+import concurrent.futures
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 
@@ -257,6 +258,10 @@ class CollectionService:
         self.symbol = symbol
         self.shutdown_event = asyncio.Event()
         self.stats = Stats()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+        self.write_buffer = []
+        self._buffer_lock = asyncio.Lock()
+        self._flush_task: Optional[asyncio.Task] = None
 
     async def _sleep(self, seconds: float):
         """Sleep that aborts immediately when shutdown is signalled."""
@@ -284,8 +289,37 @@ class CollectionService:
         """Offload synchronous SQLite I/O to a thread pool."""
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            None, self.store.insert_batch, symbol, times, prices
+            self.executor, self.store.insert_batch, symbol, times, prices
         )
+
+    async def _flush_buffer_task(self):
+        """Background task to periodically flush the write buffer."""
+        logger.debug("Flush task started.")
+        while not self.shutdown_event.is_set():
+            try:
+                await asyncio.sleep(1.0)
+                await self.flush_buffer()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in flush task: {e}")
+        # Final flush on shutdown
+        await self.flush_buffer()
+        logger.debug("Flush task stopped.")
+
+    async def flush_buffer(self):
+        """Flush buffered ticks to the database."""
+        async with self._buffer_lock:
+            if not self.write_buffer:
+                return
+            batch = self.write_buffer
+            self.write_buffer = []
+
+        epochs = [t[0] for t in batch]
+        quotes = [t[1] for t in batch]
+        inserted = await self._insert_batch_async(self.symbol, epochs, quotes)
+        if inserted:
+            self.stats.inserted += inserted
 
     async def list_active_symbols(self):
         resp = await self._request_with_retry(
@@ -498,10 +532,12 @@ class CollectionService:
                     if epoch is None or quote is None:
                         continue
 
-                    inserted = await self._insert_batch_async(self.symbol, [epoch], [quote])
-                    if inserted:
-                        self.stats.inserted += inserted
+                    async with self._buffer_lock:
+                        self.write_buffer.append((epoch, quote))
                         tick_count += 1
+                        if len(self.write_buffer) >= 100:
+                            # Immediate flush if buffer is large
+                            asyncio.create_task(self.flush_buffer())
 
                     now = time.monotonic()
                     if now - last_report >= 60.0:
@@ -540,6 +576,8 @@ class CollectionService:
     def signal_shutdown(self):
         logger.info("Shutdown signal received.")
         self.shutdown_event.set()
+        if self.executor:
+            self.executor.shutdown(wait=False)
 
 
 # --- Entry Point ---
@@ -594,10 +632,12 @@ Examples:
         elif args.mode == "backfill":
             await service.collect_backfill(target_count=args.count)
         elif args.mode == "live":
+            service._flush_task = asyncio.create_task(service._flush_buffer_task())
             await service.run_live()
         elif args.mode == "both":
             await service.collect_backfill(target_count=args.count)
             if not service.shutdown_event.is_set():
+                service._flush_task = asyncio.create_task(service._flush_buffer_task())
                 await service.run_live()
     finally:
         await client.disconnect()

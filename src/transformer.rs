@@ -152,7 +152,7 @@ impl Drop for TransformerModel {
 }
 
 impl ProbabilityModel for TransformerModel {
-    fn probability_up(&mut self, _tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
+    fn probability_up(&self, _tick: &TickSnapshot, history: &[TickSnapshot]) -> f64 {
         if history.len() >= self.sequence_length {
             let start_idx = history.len() - self.sequence_length;
             let sequence = &history[start_idx..];

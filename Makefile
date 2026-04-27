@@ -14,6 +14,7 @@ help:
 	@echo "test        : Run Rust unit tests (offline)"
 	@echo "test-py     : Run Python unit tests"
 	@echo "verify      : Format, check, and test everything"
+	@echo "verify-stats : Run statistical integrity verification"
 	@echo "run         : Start the trading engine"
 	@echo "backtest    : Run strategy backtesting on data/ticks.csv"
 	@echo "export      : Export ticks from SQLite to data/ticks.csv (use SYMBOL=R_100)"
@@ -34,7 +35,10 @@ test:
 test-py:
 	$(PYTHON) -m pytest tests/
 
-verify: fmt check test test-py
+verify: fmt check test test-py verify-stats
+
+verify-stats:
+	$(CARGO) test --test verification --locked --offline -- --nocapture
 
 run:
 	$(CARGO) run --locked --offline
