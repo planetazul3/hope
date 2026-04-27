@@ -67,11 +67,12 @@ impl TransformerModel {
             .into_optimized()?
             .into_runnable()?;
 
-        let queue: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(2));
-        let pool: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(2));
+        let queue_size = if std::env::var("BACKTEST_MODE").is_ok() { 2048 } else { 16 };
+        let queue: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(queue_size));
+        let pool: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(queue_size));
 
         // Pre-allocate zero-allocation feature buffers
-        for _ in 0..2 {
+        for _ in 0..queue_size {
             let _ = pool.push(vec![0.0f32; sequence_length * 8]);
         }
 

@@ -92,9 +92,12 @@ fn main() -> Result<()> {
             continue; // Skip malformed or empty lines
         };
 
-        let epoch: u64 = match epoch_str.parse() {
-            Ok(v) => v,
-            Err(_) => continue, // Likely a header or malformed line
+        let epoch: u64 = match epoch_str.parse::<f64>() {
+            Ok(v) => v as u64,
+            Err(_) => {
+                eprintln!("Warning: skipping malformed epoch '{}'", epoch_str);
+                continue;
+            }
         };
         let quote: f64 = match quote_str.parse() {
             Ok(v) => v,
