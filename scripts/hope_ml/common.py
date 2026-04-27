@@ -45,7 +45,7 @@ class SimpleTransformerV2(nn.Module):
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        self.direction_head = nn.Sequential(nn.Linear(d_model, 1), nn.Sigmoid())
+        self.direction_head = nn.Linear(d_model, 1)
         self.volatility_head = nn.Linear(d_model, 1)
 
     def generate_causal_mask(self, sz, device):
@@ -72,7 +72,11 @@ class SimpleTransformerV2(nn.Module):
         if return_feat:
             return feat
             
-        return self.direction_head(feat), self.volatility_head(feat)
+        direction_logits = self.direction_head(feat)
+        if self.training:
+            return direction_logits, self.volatility_head(feat)
+        else:
+            return torch.sigmoid(direction_logits), self.volatility_head(feat)
 
 def prepare_features(prices, seq_len=32):
     if len(prices) <= seq_len + 3:
@@ -108,13 +112,21 @@ def prepare_features(prices, seq_len=32):
     streaks, reversals = [], []
     last_trend_direction, last_direction, curr_streak, ticks_since_reversal = 0, 0, 0, 0
     for d in directions:
-        if d == 0: curr_streak = 0
-        elif d == last_direction: curr_streak += 1
-        else: curr_streak = 1
+        if d == 0:
+            curr_streak = 0
+        elif d == last_direction:
+            curr_streak += 1
+        else:
+            curr_streak = 1
+            
         if (d == 1 and last_trend_direction == -1) or (d == -1 and last_trend_direction == 1):
             ticks_since_reversal = 1
-        elif d != 0: ticks_since_reversal += 1
-        if d != 0: last_trend_direction = d
+        elif d != 0:
+            ticks_since_reversal += 1
+            
+        if d != 0:
+            last_trend_direction = d
+            
         streaks.append(curr_streak)
         reversals.append(ticks_since_reversal)
         last_direction = d
@@ -155,14 +167,15 @@ def contrastive_loss(feat1, feat2, temperature=0.1):
     loss2 = nn.functional.cross_entropy(logits.T, labels)
     return (loss1 + loss2) / 2.0
 
-def focal_loss(output, target, pos_weight=None, gamma=2.0, smoothing=0.05):
+def focal_loss(output_logits, target, pos_weight=None, gamma=2.0, smoothing=0.05):
     target_smooth = target * (1 - smoothing) + 0.5 * smoothing
-    bce_loss = nn.functional.binary_cross_entropy(output, target_smooth, reduction='none')
-    focal_pt = torch.where(target_smooth > 0.5, output, 1 - output)
+    bce_loss = nn.functional.binary_cross_entropy_with_logits(output_logits, target_smooth, reduction='none')
+    probs = torch.sigmoid(output_logits)
+    focal_pt = torch.where(target_smooth > 0.5, probs, 1 - probs)
     if pos_weight is not None:
-        weight = torch.where(target == 1, pos_weight, torch.ones_like(output))
+        weight = torch.where(target == 1, pos_weight, torch.ones_like(probs))
     else:
-        weight = torch.ones_like(output)
+        weight = torch.ones_like(probs)
     loss = weight * (1 - focal_pt) ** gamma * bce_loss
     return torch.mean(loss)
 
