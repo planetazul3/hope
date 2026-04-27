@@ -5,6 +5,10 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("LOG_LEVEL")

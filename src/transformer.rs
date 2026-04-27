@@ -67,7 +67,11 @@ impl TransformerModel {
             .into_optimized()?
             .into_runnable()?;
 
-        let queue_size = if std::env::var("BACKTEST_MODE").is_ok() { 2048 } else { 16 };
+        let queue_size = if std::env::var("BACKTEST_MODE").is_ok() {
+            2048
+        } else {
+            16
+        };
         let queue: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(queue_size));
         let pool: Arc<ArrayQueue<Vec<f32>>> = Arc::new(ArrayQueue::new(queue_size));
 

@@ -9,6 +9,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 fn main() -> Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let config = AppConfig::load().expect("failed to load configuration");
 
     let csv_path = {
