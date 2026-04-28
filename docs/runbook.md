@@ -78,3 +78,5 @@ The `StrategyEngine` uses dynamic modifiers that can be tuned in `.env`:
 -   **Invalid State Transition**: Indicates a race condition was blocked by the FSM. The engine resets to `Idle`.
 -   **InternalQueueFull**: Outbound command channel is saturated. Check if the WebSocket connection is hanging.
 -   **Insufficient History**: Transformer model needs more ticks before it can predict. The engine will skip signals until history is filled.
+-   **No Signal / Stuck Terminal**: The engine periodically logs a heartbeat every 30 ticks to the console (e.g., "monitoring market... waiting for signal") indicating it is still alive. If trades are not firing, check the `reason` field in the log or the `tick_audit.log` for skip reasons like `Short Trend`, `Low Volatility`, or `Below Threshold`.
+

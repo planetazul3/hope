@@ -94,6 +94,7 @@ struct Engine {
     balance: Option<f64>,
     buffered_close_event: Option<(u64, f64)>,
     tracked_contracts: Arc<RwLock<BTreeSet<u64>>>,
+    tick_count: u64,
 }
 
 impl Engine {
@@ -188,6 +189,7 @@ impl Engine {
             balance: None,
             buffered_close_event: None,
             tracked_contracts,
+            tick_count: 0,
         }
     }
 
@@ -243,6 +245,7 @@ impl Engine {
     ) -> Result<()> {
         match event {
             WebSocketEvent::Tick(tick) => {
+                self.tick_count += 1;
                 let tick_started_at = Instant::now();
                 let snapshot = self.tick_processor.push(tick.epoch, tick.quote);
                 self.execution.on_tick(snapshot.epoch, tick_started_at);
@@ -442,10 +445,20 @@ impl Engine {
                     self.tick_logger.try_log(
                         snapshot,
                         decision.probability_up,
-                        "no_signal",
+                        decision.skip_reason.unwrap_or("no_signal"),
                         self.fsm.state(),
                         tick_started_at.elapsed().as_millis(),
                     );
+
+                    if self.tick_count % 30 == 0 {
+                        tracing::info!(
+                            price = snapshot.price,
+                            prob_up = %format!("{:.2}%", decision.probability_up * 100.0),
+                            volatility = %format!("{:.5}", snapshot.volatility),
+                            reason = decision.skip_reason.unwrap_or("unknown"),
+                            "monitoring market... waiting for signal"
+                        );
+                    }
                 }
             }
             WebSocketEvent::TradeUpdate(update) => match update {

@@ -61,6 +61,7 @@ pub enum SignalDirection {
 pub struct StrategyDecision {
     pub probability_up: f64,
     pub signal: Option<SignalDirection>,
+    pub skip_reason: Option<&'static str>,
 }
 
 /// Core engine for evaluating tick data and generating trading signals.
@@ -117,6 +118,7 @@ where
             return StrategyDecision {
                 probability_up,
                 signal: None,
+                skip_reason: Some("State Not Idle or Streak < 2"),
             };
         }
 
@@ -125,6 +127,7 @@ where
             return StrategyDecision {
                 probability_up,
                 signal: None,
+                skip_reason: Some("Short Trend"),
             };
         }
 
@@ -133,6 +136,7 @@ where
             return StrategyDecision {
                 probability_up,
                 signal: None,
+                skip_reason: Some("Zero Volatility"),
             };
         }
 
@@ -141,6 +145,7 @@ where
             return StrategyDecision {
                 probability_up,
                 signal: None,
+                skip_reason: Some("Low Return Magnitude"),
             };
         }
 
@@ -174,6 +179,11 @@ where
         StrategyDecision {
             probability_up,
             signal,
+            skip_reason: if signal.is_none() {
+                Some("Below Threshold")
+            } else {
+                None
+            },
         }
     }
 }
@@ -211,6 +221,7 @@ mod tests {
 
         assert_eq!(decision.probability_up, 0.6);
         assert_eq!(decision.signal, Some(SignalDirection::Up));
+        assert_eq!(decision.skip_reason, None);
     }
 
     #[test]
@@ -232,6 +243,7 @@ mod tests {
 
         assert_eq!(decision.probability_up, 0.6);
         assert_eq!(decision.signal, None);
+        assert_eq!(decision.skip_reason, Some("Short Trend"));
     }
 
     #[test]
@@ -254,6 +266,7 @@ mod tests {
         let strategy = StrategyEngine::new(0.58, VariableModel(0.6), 5, 0.05, 0.02, 0.1);
         let decision = strategy.evaluate(&snapshot, &[], TradingState::Idle);
         assert_eq!(decision.signal, None);
+        assert_eq!(decision.skip_reason, Some("Below Threshold"));
 
         // Case 2: Volatility is high. Base threshold 0.58. Adjusted is 0.58.
         // 0.6 >= 0.58. Should be Some(Up).
@@ -261,6 +274,7 @@ mod tests {
         snapshot_high_vol.volatility = 0.5;
         let decision_high_vol = strategy.evaluate(&snapshot_high_vol, &[], TradingState::Idle);
         assert_eq!(decision_high_vol.signal, Some(SignalDirection::Up));
+        assert_eq!(decision_high_vol.skip_reason, None);
     }
 
     #[test]
@@ -286,5 +300,6 @@ mod tests {
         // Model returns 0.49. Since adjusted_threshold is 0.5, 0.49 < 0.5 -> No signal.
         // If it didn't clamp, 0.49 >= 0.48 -> Signal.
         assert_eq!(decision.signal, None);
+        assert_eq!(decision.skip_reason, Some("Below Threshold"));
     }
 }
