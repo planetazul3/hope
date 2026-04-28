@@ -8,6 +8,7 @@
 -   **[Architecture](architecture.md)**: System overview, runtime flow, and core boundaries.
 -   **[Blueprint](blueprint.md)**: The target state and design principles of the engine.
 -   **[Roadmap](roadmap.md)**: Current development stage and completed milestones.
+-   **[Project Structure](project_structure.md)**: File tree and system architecture diagram.
 
 ### Operations
 -   **[Runbook](runbook.md)**: Command reference, setup instructions, and troubleshooting.
