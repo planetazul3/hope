@@ -1,3 +1,18 @@
+# Project Context
+
+## Modernization Baseline (April 2026)
+The project has been modernized to an April 2026 baseline.
+
+### Environment & Dependencies
+- **Python**: Modernized to NumPy 2.4.4 and Pandas 3.0.2. See [scripts/GEMINI.md](./scripts/GEMINI.md) for full details.
+- **Rust**: Updated to modern standards:
+  - `rustls`: 0.23.40
+  - `idna_adapter`: 1.2.2
+  - `tract-onnx`: 0.21 (verified)
+  - `tokio-tungstenite`: 0.28 (verified)
+
+---
+
 # Gemini Instructions
 
 This repository uses `AGENTS.md` as the canonical project instruction file.

@@ -1,9 +1,20 @@
 # Scripts Context
 
-## Python & ML Modernization (April 2026)
-Detailed context for the modernization of the Python environment and ML pipeline.
+## Python & ML Modernization (April 2026) - COMPLETED
+Baseline established for all future session development.
 
-### Status & Progress
-- **Audit**: `requirements.txt` is updated to advanced versions (NumPy 2.4.4, Pandas 3.0.2).
-- **Issues**: Binary compatibility conflict detected between NumPy 2.x and downstream libraries (Optuna, Matplotlib visualization modules).
-- **Target**: Ensure compatibility with Python 3.12+ features and updated APIs in `scripts/hope_ml`.
+### Environment Versions
+- **NumPy**: 2.4.4 (integrated)
+- **Pandas**: 3.0.2 (integrated)
+- **Matplotlib**: 3.10.9 (upgraded for NumPy 2.x compatibility)
+- **Seaborn**: 0.13.2 (upgraded for NumPy 2.x compatibility)
+- **ONNX Runtime**: 1.25.1
+- **PyTorch**: 2.11.0 (stable)
+- **Scikit-learn**: 1.8.0 (stable)
+- **Optuna**: 4.8.0 (stable)
+
+### Verification
+- `scripts/grid_backtest.py` runs without binary crashes.
+- `scripts/hope_ml/common.py` and `scripts/train_fixed.py` compatible with new stack.
+- `scripts/export_db.py` Pandas 3.0 compatibility verified.
+

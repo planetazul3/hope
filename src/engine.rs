@@ -212,11 +212,16 @@ impl Engine {
 
     fn load_state() -> Option<SystemState> {
         if let Ok(json) = std::fs::read_to_string(STATE_FILE) {
-            if let Ok(state) = serde_json::from_str::<SystemState>(&json) {
-                return Some(state);
+            match serde_json::from_str::<SystemState>(&json) {
+                Ok(state) => Some(state),
+                Err(err) => {
+                    error!(error = %err, "failed to parse system state file; resetting to fresh state");
+                    None
+                }
             }
+        } else {
+            None
         }
-        None
     }
 
     fn transition(&mut self, next: TradingState) -> Result<()> {

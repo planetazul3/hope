@@ -4,21 +4,21 @@ Professional Bayesian Optimization Engine for Hope Trading System
 ------------------------------------------------------------------
 A production-grade Optuna orchestrator ensuring mathematical rigor.
 
-Architectural Enhancements:
-  1. Mathematical Constraints: Replaces hacky penalty functions with Optuna's 
-     native `constraints_func` in the TPESampler. This guarantees the KDE 
-     (Kernel Density Estimator) correctly maps the continuous search space 
-     without mathematical distortion from arbitrary negative rewards.
-  2. Derived Statistical Metrics: Computes Expectancy and Profit Factor internally 
-     to verify Rust output integrity and provide professional quant scoring.
-  3. SQLite WAL Concurrency: Enforces Write-Ahead Logging at the SQL level to 
-     eliminate database locking during highly parallel multi-core execution.
-  4. Robust IPC Parsing: Validates Rust stdout via dataclasses and handles missing 
-     metrics safely without panicking.
-  5. Multi-Target Optimization: Natively supports Profit, Expectancy, and Sharpe.
+Architectural Enhancements & Bug Fixes:
+  1. Concurrency Fix: Removed `constant_liar` and `RetryFailedTrialCallback` 
+     which cause `ValueError: Cannot tell a COMPLETE trial` race conditions 
+     when using SQLite with `n_jobs > 1`. Implemented a thread-safe internal 
+     retry loop instead.
+  2. Warning Suppression: Cleaned up CLI output by suppressing Optuna's 
+     experimental feature warnings.
+  3. Mathematical Constraints: Uses Optuna's native `constraints_func` in the 
+     TPESampler to guarantee the KDE correctly maps the continuous search space.
+  4. Derived Statistical Metrics: Computes Expectancy and Profit Factor internally.
+  5. SQLite WAL Concurrency: Enforces Write-Ahead Logging and busy_timeout at 
+     the SQL level to eliminate database locking during highly parallel execution.
 
 Usage:
-  python3 scripts/grid_backtest.py --trials 200 --jobs 4 --target expectancy
+  python3 scripts/grid_backtest.py --trials 400 --jobs 4 --target profit
 """
 
 import os
@@ -30,16 +30,20 @@ import argparse
 import subprocess
 import logging
 import multiprocessing
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Any, Sequence, Tuple
+from typing import Dict, Optional, Any, Sequence
 from dataclasses import dataclass, asdict
 
 import pandas as pd
 import optuna
 from optuna.trial import TrialState, Trial
 from optuna.samplers import TPESampler
-from optuna.storages import RDBStorage, RetryFailedTrialCallback
+from optuna.storages import RDBStorage
+
+# Suppress Optuna experimental warnings for cleaner CLI output
+warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
 
 # ---------------------------------------------------------------------------
 # UI & Logging Configuration
@@ -81,6 +85,15 @@ RE_PROFIT   = re.compile(r"Total Profit:\s+(-?[\d.]+)")
 RE_SHARPE   = re.compile(r"Sharpe Ratio:\s+(-?[\d.]+)")
 RE_DRAWDOWN = re.compile(r"Max Drawdown:\s+([\d.]+)")
 
+def _safe_float(regex_match) -> float:
+    """Extract a float from a regex match, defaulting to 0.0 on failure."""
+    if regex_match:
+        try:
+            return float(regex_match.group(1))
+        except (ValueError, IndexError):
+            pass
+    return 0.0
+
 # ---------------------------------------------------------------------------
 # Data Structures
 # ---------------------------------------------------------------------------
@@ -117,16 +130,15 @@ def compute_derived_metrics(
     win_rate = (wins / trades) * 100.0 if trades > 0 else 0.0
     losses = trades - wins
     
-    # Expectancy: Average profit per trade. Essential for high-frequency evaluation.
+    # Expectancy: Average profit per trade.
     expectancy = profit / trades if trades > 0 else 0.0
 
     # Profit Factor Proxy: (Wins * Avg Win) / (Losses * Avg Loss)
-    # Since we only have net profit, we approximate bounds if negative/positive
     profit_factor = 0.0
     if losses == 0 and profit > 0:
-        profit_factor = 999.0  # Infinite profit factor
+        profit_factor = 999.0
     elif profit < 0:
-        profit_factor = max(0.0, 1.0 + (profit / trades)) # Proxy for negative expectancy
+        profit_factor = max(0.0, 1.0 + (profit / trades))
     else:
         profit_factor = 1.0 + (profit / trades)
 
@@ -177,23 +189,36 @@ def run_rust_backtest(params: Dict[str, Any], timeout_seconds: int = 120) -> Opt
     trades = int(trades_match.group(1)) if trades_match else 0
 
     if trades == 0:
-        return compute_derived_metrics(0, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return compute_derived_metrics(0, 0, 0.0, 0.0, 0.0, 0.0)
 
     try:
-        sharpe_match = RE_SHARPE.search(output)
-        dd_match = RE_DRAWDOWN.search(output)
-        
+        wins = int(RE_WINS.search(output).group(1))
+        profit = float(RE_PROFIT.search(output).group(1))
+        reported_win_rate = float(RE_WIN_RATE.search(output).group(1))
+        reported_sharpe = _safe_float(RE_SHARPE.search(output))
+        reported_drawdown = _safe_float(RE_DRAWDOWN.search(output))
         return compute_derived_metrics(
             trades=trades,
-            wins=int(RE_WINS.search(output).group(1)),
-            profit=float(RE_PROFIT.search(output).group(1)),
-            reported_win_rate=float(RE_WIN_RATE.search(output).group(1)),
-            reported_sharpe=float(sharpe_match.group(1)) if sharpe_match else 0.0,
-            reported_drawdown=float(dd_match.group(1)) if dd_match else 0.0
+            wins=wins,
+            profit=profit,
+            reported_win_rate=reported_win_rate,
+            reported_sharpe=reported_sharpe,
+            reported_drawdown=reported_drawdown
         )
-    except (AttributeError, ValueError):
-        logger.error("Stdout regex parser failed. Verify Rust output formatting.")
+    except (AttributeError, ValueError) as e:
+        logger.error("Stdout regex parser failed: %s. Verify Rust output formatting.", e)
         return None
+
+# ---------------------------------------------------------------------------
+# Safe attribute fetching for constraints
+# ---------------------------------------------------------------------------
+def _get_user_attr_float(trial: Trial, key: str, default: float = 0.0) -> float:
+    """Return a user attribute as float, ensuring no None values."""
+    val = trial.user_attrs.get(key, default)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
 
 # ---------------------------------------------------------------------------
 # Optuna Objective & Constraint Management
@@ -212,34 +237,38 @@ class ObjectiveEvaluator:
             elif spec["type"] == "int":
                 params[name] = trial.suggest_int(name, spec["low"], spec["high"])
 
-        metrics = run_rust_backtest(params, timeout_seconds=self.timeout)
-        
+        # Thread-safe internal retry loop (replaces RetryFailedTrialCallback)
+        max_retries = 3
+        metrics = None
+        for attempt in range(max_retries):
+            metrics = run_rust_backtest(params, timeout_seconds=self.timeout)
+            if metrics is not None:
+                break
+            if attempt < max_retries - 1:
+                logger.debug(f"Trial {trial.number} subprocess failed. Retrying ({attempt + 1}/{max_retries})...")
+
         if not metrics:
-            raise optuna.TrialPruned("Subprocess execution failed.")
+            raise optuna.TrialPruned("Subprocess execution failed after retries.")
 
         # Attach all computed data mathematically to the trial attributes
         for k, v in asdict(metrics).items():
             trial.set_user_attr(k, v)
 
-        # The target metric is returned purely. 
-        # Constraints are handled by the TPE sampler mathematically via the constraint closure.
         return getattr(metrics, self.target_metric)
 
 def build_constraints(min_trades: int, min_win_rate: float):
     """
     Closure providing Optuna with a mathematical constraint evaluator.
     Returns a sequence of values where <= 0.0 is feasible and > 0.0 is violated.
-    This replaces hacky penalty returns and allows the TPE algorithm to map the space correctly.
     """
     def constraints_func(trial: Trial) -> Sequence[float]:
-        trades = trial.user_attrs.get("trades", 0)
-        win_rate = trial.user_attrs.get("win_rate", 0.0)
-        
-        # Condition 1: Trades must be >= min_trades (min_trades - trades <= 0)
-        c1 = min_trades - trades
-        # Condition 2: Win Rate must be >= min_win_rate (min_win_rate - win_rate <= 0)
+        trades   = _get_user_attr_float(trial, "trades", 0.0)
+        win_rate = _get_user_attr_float(trial, "win_rate", 0.0)
+
+        # Condition 1: trades must be >= min_trades  -> (min_trades - trades) <= 0
+        c1 = float(min_trades) - trades
+        # Condition 2: win_rate must be >= min_win_rate -> (min_win_rate - win_rate) <= 0
         c2 = min_win_rate - win_rate
-        
         return (c1, c2)
     return constraints_func
 
@@ -292,12 +321,28 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     return parser
 
+def validate_bounds(args):
+    """Ensure low < high for each parameter. Exit early if violated."""
+    errors = []
+    for name in ["threshold", "momentum_reward", "volatility_penalty"]:
+        low = getattr(args, f"{name}_low")
+        high = getattr(args, f"{name}_high")
+        if low >= high:
+            errors.append(f"--{name}-low ({low}) must be less than --{name}-high ({high})")
+    if args.trend_length_low >= args.trend_length_high:
+        errors.append(f"--trend-length-low ({args.trend_length_low}) must be less than --trend-length-high ({args.trend_length_high})")
+    if errors:
+        for e in errors:
+            logger.error(e)
+        sys.exit(1)
+
 def configure_sqlite_wal(db_path: Path) -> str:
-    """Enforce Write-Ahead Logging to prevent multithreading lock conflicts."""
+    """Enforce Write-Ahead Logging and busy timeouts to prevent multithreading lock conflicts."""
     import sqlite3
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     conn.close()
     return f"sqlite:///{db_path}"
 
@@ -305,6 +350,8 @@ def main() -> None:
     global _study
     parser = build_argument_parser()
     args = parser.parse_args()
+
+    validate_bounds(args)
 
     signal.signal(signal.SIGINT, _shutdown_handler)
     signal.signal(signal.SIGTERM, _shutdown_handler)
@@ -351,7 +398,13 @@ def main() -> None:
     # Configure SQLite Database with concurrent safety
     db_path = run_dir / "optuna_study.db"
     storage_url = configure_sqlite_wal(db_path)
-    storage = RDBStorage(url=storage_url, engine_kwargs={"connect_args": {"timeout": 120.0}})
+    
+    storage = RDBStorage(
+        url=storage_url, 
+        engine_kwargs={
+            "connect_args": {"timeout": 120.0}
+        }
+    )
 
     search_space = {
         "threshold":          {"type": "float", "low": args.threshold_low, "high": args.threshold_high, "step": args.threshold_step},
@@ -362,9 +415,8 @@ def main() -> None:
 
     # Multivariate TPE Sampler with hard mathematical constraints
     sampler = TPESampler(
-        seed=args.seed, 
-        multivariate=True, 
-        constant_liar=True,
+        seed=args.seed,
+        multivariate=True,
         constraints_func=build_constraints(args.min_trades, args.min_win_rate)
     )
 
@@ -387,7 +439,6 @@ def main() -> None:
             objective,
             n_trials=args.trials,
             n_jobs=args.jobs,
-            callbacks=[RetryFailedTrialCallback(max_retry=3)],
             show_progress_bar=True,
         )
     except KeyboardInterrupt:

@@ -524,6 +524,10 @@ impl DerivWebSocketClient {
                     .await?;
                 }
             }
+            Some("ping") => {
+                // Deriv sends unsolicited pings and ping responses.
+                // We handle these silently to reduce debug log noise.
+            }
             Some(other) => {
                 debug!(msg_type = %other, "ignoring unsupported message type");
             }
