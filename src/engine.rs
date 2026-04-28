@@ -559,6 +559,21 @@ impl Engine {
 
                     if update.is_sold.unwrap_or(0) == 1 {
                         if Some(update.contract_id) != self.active_contract_id {
+                            // ADR 0020: If we are in Recovery and this contract is tracked, process it immediately
+                            // to avoid a deadlock waiting for a BuyAccepted message that will never arrive.
+                            if self.fsm.state() == TradingState::Recovery
+                                && self.tracked_contracts.read().contains(&update.contract_id)
+                            {
+                                info!(contract_id = update.contract_id, "processing immediate closure during recovery for tracked contract");
+                                let profit = update.profit.unwrap_or(0.0);
+                                self.process_contract_closure(
+                                    update.contract_id,
+                                    profit,
+                                    command_tx,
+                                )?;
+                                return Ok(());
+                            }
+
                             if self.fsm.state() == TradingState::OrderPending
                                 || self.fsm.state() == TradingState::Recovery
                             {
