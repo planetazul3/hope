@@ -13,14 +13,16 @@ This document provides a high-level overview of the `hope` repository structure 
 │   ├── adr                 # Architectural Decision Records
 │   ├── blueprint.md        # Desired system shape and boundaries
 │   ├── roadmap.md          # Active development tracker
-│   └── runbook.md          # Operational guide for the live engine
+│   └── project_structure.md # This document
 ├── notebooks               # ML training notebooks (Colab/Kaggle)
+├── backtest_optimization   # Persistent storage for Optuna studies
+│   └── run_[TIMESTAMP]     # Individual optimization session data (Logs, CSV, SQLite DB)
 ├── scripts                 # Python utilities for data and ML management
 │   ├── hope_ml             # Shared ML utility logic
 │   ├── tick_collector.py   # Historical and live tick data ingestion
 │   ├── export_db.py        # SQLite to CSV/Parquet export tool
 │   ├── export_to_onnx.py   # PyTorch to ONNX conversion script
-│   └── grid_backtest.py    # Bayesian optimization (Optuna) pipeline
+│   └── grid_backtest.py    # Professional Bayesian Optimization CLI (Optuna)
 ├── src                     # Core Rust implementation
 │   ├── lib.rs              # Library entry point and shared logic
 │   ├── main.rs             # Live trading engine binary
@@ -30,7 +32,7 @@ This document provides a high-level overview of the `hope` repository structure 
 │   ├── fsm.rs              # Finite State Machine for trade lifecycle
 │   └── transformer.rs      # ONNX inference for Transformer models
 ├── tests                   # Integration and unit tests
-└── data                    # Local storage for ticks and optimization results
+└── data                    # Market ticks storage (SQLite/CSV)
 ```
 
 ## System Architecture
@@ -66,7 +68,8 @@ graph TD
     subgraph "Backtesting"
         CSV --> |Simulation| BT[Backtest Binary]
         OPT[Optuna Script] --> |Hyperparameter Search| BT
-        BT --> |Results| CSV_RES[optuna_results.csv]
+        BT --> |Results| OPT_STORE[(Optuna SQLite DB)]
+        OPT_STORE --> |Analysis| CSV_RES[optuna_results.csv]
     end
 
     DC -.-> |Live Subscription| WS
@@ -86,5 +89,8 @@ Combines raw tick data with computed features (Wavelets) and model predictions (
 ### 4. ML Workflow (`scripts/`, `notebooks/`)
 A standardized pipeline for collecting data, training noise-resilient models in the cloud, and exporting them back to the Rust environment for inference.
 
-### 5. Backtesting (`src/bin/backtest.rs`, `scripts/grid_backtest.py`)
-Provides bit-perfect simulation of the live engine using historical data, enabling rigorous strategy validation and hyperparameter optimization.
+### 5. Backtesting & Optimization (`src/bin/backtest.rs`, `scripts/grid_backtest.py`)
+Provides bit-perfect simulation of the live engine. The `grid_backtest.py` script leverages **Optuna** for Bayesian optimization, featuring:
+- **CLI Control**: Configurable search spaces, trials, and timeouts.
+- **Persistence**: SQLite-backed studies for resuming interrupted sessions.
+- **Observability**: Structured logging and interactive HTML visualizations (Plotly).
