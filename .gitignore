@@ -81,3 +81,4 @@ Thumbs.db
 # ----------------------------------------------------------------------
 .codex
 *_merged_sources*.txt
+backtest_optimization/
