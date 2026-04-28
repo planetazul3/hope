@@ -10,3 +10,5 @@ python-dotenv==1.2.2
 seaborn==0.12.2
 onnxruntime==1.20.1
 fastparquet==2024.2.0
+optuna==4.2.1
+plotly==6.0.0

@@ -105,3 +105,8 @@ Status: `Done`
 ## Stage 13 - Live Trading Deployment and Anomaly Monitoring
 
 Status: `In Progress`
+- [x] Implement Bayesian Optimization pipeline using Optuna for strategy hyperparameter tuning
+- [x] Integrate Optuna and Plotly for advanced performance visualization
+- [x] Harden backtester logging to include all strategy optimization targets
+- [ ] Implement real-time anomaly detection for live trading drift
+- [ ] Deploy live trading engine with production-ready guards

@@ -201,13 +201,27 @@ fn main() -> Result<()> {
     };
 
     println!("--- Backtest Results ---");
-    println!("Model:        {:?}", config.model_type);
-    println!("Threshold:    {:.4}", config.probability_threshold);
-    println!("Total Trades: {}", outcome.total_trades);
-    println!("Wins:         {}", outcome.wins);
-    println!("Losses:       {}", outcome.losses);
-    println!("Win Rate:     {:.2}%", win_rate);
-    println!("Total Profit: {:.2}", outcome.total_profit);
+    println!("Model:                {:?}", config.model_type);
+    println!("Threshold:            {:.4}", config.probability_threshold);
+    println!("Min Trend Length:     {}", config.min_trend_length);
+    println!(
+        "Volatility Penalty:   {:.4}",
+        config.strategy_volatility_penalty
+    );
+    println!(
+        "Momentum Reward:      {:.4}",
+        config.strategy_momentum_reward
+    );
+    println!(
+        "Min Return Ratio:     {:.4}",
+        config.strategy_min_return_ratio
+    );
+    println!("------------------------");
+    println!("Total Trades:         {}", outcome.total_trades);
+    println!("Wins:                 {}", outcome.wins);
+    println!("Losses:               {}", outcome.losses);
+    println!("Win Rate:             {:.2}%", win_rate);
+    println!("Total Profit:         {:.2}", outcome.total_profit);
     println!("------------------------");
 
     Ok(())
