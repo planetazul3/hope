@@ -95,6 +95,13 @@ Runtime configuration is loaded from `.env`. Logging is controlled with `LOG_LEV
 
 <!-- End of import from: ./AGENTS.md -->
 
+## Project Modernization (April 2026)
+This project is undergoing a comprehensive modernization to align all dependencies (Python and Rust) with their latest stable versions as of April 2026.
+
+- **High-level Goal**: Standardize on Python 3.12+ and Rust 2021 Edition across all components.
+- **Detailed Contexts**:
+    - [Python & ML Modernization](./scripts/GEMINI.md) — NumPy 2.x compatibility and ML pipeline updates.
+
 ## Gemini-Specific Note
 
 After updating this file or any imported instruction file, reload Gemini CLI memory so the latest repository instructions are active.
