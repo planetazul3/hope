@@ -83,3 +83,4 @@ Thumbs.db
 *_merged_sources*.txt
 backtest_optimization/
 state.json
+*snapshot*.txt
