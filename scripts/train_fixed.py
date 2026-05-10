@@ -15,7 +15,7 @@ import contextlib
 import traceback
 import gc
 
-from hope_ml.common import SimpleTransformerV2, prepare_features, contrastive_loss, focal_loss
+from hope_ml.common import SimpleTransformerV2, contrastive_loss, focal_loss
 
 # Institutional Logging Configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -135,18 +135,9 @@ def load_and_sanitize_data(csv_path, seq_len=32):
         y_dir.append(targets_dir[i+seq_len-1])
         y_vol.append(targets_vol[i+seq_len-1])
 
-    X_arr = np.array(X, dtype=np.float32)
-    y_dir_arr = np.array(y_dir, dtype=np.float32)
-    y_vol_arr = np.array(y_vol, dtype=np.float32)
-
-    # Resilient prepare_features pass
-    try:
-        X_tensor, y_dir_tensor, y_vol_tensor = prepare_features(X_arr, y_dir_arr, y_vol_arr)
-    except TypeError:
-        logger.warning("Falling back to direct tensor conversion for features.")
-        X_tensor = torch.tensor(X_arr)
-        y_dir_tensor = torch.tensor(y_dir_arr)
-        y_vol_tensor = torch.tensor(y_vol_arr)
+    X_tensor = torch.from_numpy(np.array(X, dtype=np.float32))
+    y_dir_tensor = torch.from_numpy(np.array(y_dir, dtype=np.float32))
+    y_vol_tensor = torch.from_numpy(np.array(y_vol, dtype=np.float32))
 
     input_dim = X_tensor.shape[2]
     return X_tensor, y_dir_tensor, y_vol_tensor, input_dim
@@ -190,7 +181,9 @@ def main(csv_path: str = None, log_dir: str = None):
     try:
         if log_dir is None:
             log_dir = os.environ.get("LOG_DIR", "logs")
+        os.makedirs(log_dir, exist_ok=True)
         writer = SummaryWriter(log_dir=log_dir)
+        best_model_path = os.path.join(log_dir, "best_model.pth")
         logger.info(f"TensorBoard logging to: {log_dir}")
         
         # Cloud Environment Fallbacks
@@ -218,13 +211,32 @@ def main(csv_path: str = None, log_dir: str = None):
         # Load, Sanitize, and Extract
         X_all, y_dir_all, y_vol_all, input_dim = load_and_sanitize_data(csv_path, seq_len=seq_len)
 
-        # Chronological Split (Strictly 80/20 to avoid time-series leakage)
+        # Chronological Split (Strictly 80/20 to avoid time-series leakage).
+        # The label horizon is +10 ticks (target_quote_future = quote.shift(-10))
+        # and each sample is a window of length seq_len. Purge gap = seq_len + 10
+        # so that no validation window overlaps with any train label.
         split = int(len(X_all) * 0.8)
+        purge_gap = seq_len + 10
         train_ds = TensorDataset(X_all[:split], y_dir_all[:split], y_vol_all[:split])
-        val_ds = TensorDataset(X_all[split + seq_len:], y_dir_all[split + seq_len:], y_vol_all[split + seq_len:])
-        
-        train_loader = DataLoader(train_ds, batch_size=128, shuffle=True, num_workers=2, pin_memory=True, drop_last=True)
-        val_loader = DataLoader(val_ds, batch_size=128, shuffle=False, num_workers=2, pin_memory=True)
+        val_ds = TensorDataset(X_all[split + purge_gap:], y_dir_all[split + purge_gap:], y_vol_all[split + purge_gap:])
+
+        loader_generator = torch.Generator()
+        loader_generator.manual_seed(_SEED)
+
+        def _seed_worker(worker_id):
+            worker_seed = (_SEED + worker_id) % (2**32)
+            np.random.seed(worker_seed)
+            _random.seed(worker_seed)
+
+        train_loader = DataLoader(
+            train_ds, batch_size=128, shuffle=True, num_workers=2,
+            pin_memory=True, drop_last=True,
+            generator=loader_generator, worker_init_fn=_seed_worker,
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=128, shuffle=False, num_workers=2,
+            pin_memory=True, worker_init_fn=_seed_worker,
+        )
 
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Training on: {device} | Input Dimension: {input_dim}")
@@ -347,7 +359,7 @@ def main(csv_path: str = None, log_dir: str = None):
 
             if auc_val > best_auc:
                 best_auc = auc_val
-                torch.save(model.state_dict(), "best_model.pth")
+                torch.save(model.state_dict(), best_model_path)
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -358,7 +370,7 @@ def main(csv_path: str = None, log_dir: str = None):
         # ---------------------------------------------------------
         # EXPORT & OPTIMIZATION
         # ---------------------------------------------------------
-        model.load_state_dict(torch.load("best_model.pth", weights_only=True))
+        model.load_state_dict(torch.load(best_model_path, weights_only=True))
         model.eval()
 
         class InferenceModel(nn.Module):
@@ -373,8 +385,25 @@ def main(csv_path: str = None, log_dir: str = None):
         dummy = torch.randn(1, seq_len, input_dim)
         onnx_path = "model.onnx"
         
-        torch.onnx.export(infer_model, dummy, onnx_path, export_params=True, opset_version=15,
-                          do_constant_folding=True, input_names=['input'], output_names=['output'])
+        # Force the legacy TorchScript exporter: the new dynamo-based path
+        # (default in torch >= 2.9) requires `onnxscript` which is not pinned
+        # in requirements.txt and produces graphs Tract cannot consume reliably.
+        try:
+            torch.onnx.export(
+                infer_model, dummy, onnx_path,
+                export_params=True, opset_version=15,
+                do_constant_folding=True,
+                input_names=['input'], output_names=['output'],
+                dynamo=False,
+            )
+        except TypeError:
+            # Older torch (<2.9) does not accept the dynamo kwarg.
+            torch.onnx.export(
+                infer_model, dummy, onnx_path,
+                export_params=True, opset_version=15,
+                do_constant_folding=True,
+                input_names=['input'], output_names=['output'],
+            )
         logger.info(f"Exported {onnx_path} (Static Graph: 1x{seq_len}x{input_dim})")
 
         # Dynamic INT8 Quantization
