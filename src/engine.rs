@@ -450,7 +450,7 @@ impl Engine {
                         tick_started_at.elapsed().as_millis(),
                     );
 
-                    if self.tick_count % 30 == 0 {
+                    if self.tick_count.is_multiple_of(30) {
                         tracing::info!(
                             price = snapshot.price,
                             prob_up = %format!("{:.2}%", decision.probability_up * 100.0),
