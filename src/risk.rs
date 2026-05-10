@@ -37,11 +37,14 @@ impl RiskManager {
         if profit < 0.0 {
             self.consecutive_losses += 1;
             self.losses += 1;
-        } else if profit > 0.0 {
+        } else {
+            // Break-even (profit == 0.0) counts as a streak reset — it interrupted
+            // the losing run and should not allow cooldown to fire on the next loss.
             self.consecutive_losses = 0;
-            self.wins += 1;
+            if profit > 0.0 {
+                self.wins += 1;
+            }
         }
-        // If profit == 0.0, we treat it as a non-win, non-loss trade for streak purposes
 
         RiskOutcome {
             consecutive_losses: self.consecutive_losses,
@@ -79,5 +82,20 @@ mod tests {
         assert!(outcome.enter_cooldown);
         assert_eq!(outcome.total_trades, 3);
         assert_eq!(outcome.losses, 3);
+    }
+
+    #[test]
+    fn break_even_resets_loss_streak() {
+        let mut risk = RiskManager::new(3);
+        risk.on_trade_closed(-1.0);
+        risk.on_trade_closed(-1.0);
+        // Break-even should reset the streak
+        let outcome = risk.on_trade_closed(0.0);
+        assert_eq!(outcome.consecutive_losses, 0);
+        assert!(!outcome.enter_cooldown);
+        // Next loss starts a fresh streak of 1, not 3
+        let outcome = risk.on_trade_closed(-1.0);
+        assert_eq!(outcome.consecutive_losses, 1);
+        assert!(!outcome.enter_cooldown);
     }
 }

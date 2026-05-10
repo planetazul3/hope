@@ -98,11 +98,19 @@ class TickStore:
         """Insert a batch of ticks, ignoring duplicates. Returns number of inserted rows."""
         if not epochs:
             return 0
+        total = len(list(zip(epochs, quotes)))
         valid = [
             (symbol, e, q)
             for e, q in zip(epochs, quotes)
             if isinstance(e, (int, float)) and isinstance(q, (int, float)) and q > 0
         ]
+        dropped = total - len(valid)
+        if dropped > 0:
+            logger.warning(
+                "Dropped %d malformed tick(s) for %s (invalid epoch/quote type or non-positive price)",
+                dropped,
+                symbol,
+            )
         if not valid:
             return 0
         try:

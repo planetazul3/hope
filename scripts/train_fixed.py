@@ -31,6 +31,9 @@ if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+# Label Horizon (must match target_quote_future shift amount)
+_LABEL_HORIZON = 10
+
 def load_and_sanitize_data(csv_path, seq_len=32):
     """Loads data, engineers features, sanitizes NaN/Infs, and extracts 3D sequences."""
     if not os.path.exists(csv_path):
@@ -105,9 +108,10 @@ def load_and_sanitize_data(csv_path, seq_len=32):
     df['db2_a1_norm'] = df['db2_a1'] / (df['quote'] + 1e-8)
 
     # Future targets (Generates NaNs at the end)
-    df['target_quote_future'] = df['quote'].shift(-10)
+    # CRITICAL: The shift amount MUST match _LABEL_HORIZON for train/val split to be correct!
+    df['target_quote_future'] = df['quote'].shift(-_LABEL_HORIZON)
     df['target_direction'] = np.where(df['target_quote_future'] > df['quote'], 1.0, 0.0)
-    df['target_volatility'] = df['vol_10'].shift(-10)
+    df['target_volatility'] = df['vol_10'].shift(-_LABEL_HORIZON)
 
     # 2. STRICT SANITIZATION BARRIER (Pandas 2D Level)
     logger.info(f"Dimensions before sanitization: {df.shape}")
@@ -212,11 +216,11 @@ def main(csv_path: str = None, log_dir: str = None):
         X_all, y_dir_all, y_vol_all, input_dim = load_and_sanitize_data(csv_path, seq_len=seq_len)
 
         # Chronological Split (Strictly 80/20 to avoid time-series leakage).
-        # The label horizon is +10 ticks (target_quote_future = quote.shift(-10))
-        # and each sample is a window of length seq_len. Purge gap = seq_len + 10
+        # The label horizon is +_LABEL_HORIZON ticks (target_quote_future = quote.shift(-_LABEL_HORIZON))
+        # and each sample is a window of length seq_len. Purge gap = seq_len + _LABEL_HORIZON
         # so that no validation window overlaps with any train label.
         split = int(len(X_all) * 0.8)
-        purge_gap = seq_len + 10
+        purge_gap = seq_len + _LABEL_HORIZON
         train_ds = TensorDataset(X_all[:split], y_dir_all[:split], y_vol_all[:split])
         val_ds = TensorDataset(X_all[split + purge_gap:], y_dir_all[split + purge_gap:], y_vol_all[split + purge_gap:])
 
