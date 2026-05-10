@@ -4,7 +4,7 @@ use crossbeam_queue::ArrayQueue;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use tracing::{error, info, warn};
@@ -20,6 +20,10 @@ pub struct TransformerModel {
     queue: Arc<ArrayQueue<Vec<f32>>>,
     pool: Arc<ArrayQueue<Vec<f32>>>,
     latest_prob: Arc<ArcSwap<f64>>,
+    /// Tick counter at which latest_prob was last written by the inference thread.
+    prob_tick: Arc<AtomicU64>,
+    /// Number of times probability_up() has been called.
+    call_count: Arc<AtomicU64>,
     is_running: Arc<AtomicBool>,
     _handle: Option<thread::JoinHandle<()>>,
 }
@@ -81,11 +85,14 @@ impl TransformerModel {
         }
 
         let latest_prob = Arc::new(ArcSwap::from_pointee(0.5));
+        let prob_tick: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let call_count: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let is_running = Arc::new(AtomicBool::new(true));
 
         let pool_clone = Arc::clone(&pool);
         let queue_clone = Arc::clone(&queue);
         let latest_prob_clone = Arc::clone(&latest_prob);
+        let prob_tick_clone = Arc::clone(&prob_tick);
         let is_running_clone = Arc::clone(&is_running);
 
         let _handle = thread::Builder::new()
@@ -94,6 +101,7 @@ impl TransformerModel {
                 let shape = vec![1, sequence_length, 8];
                 let mut input_tensor = Tensor::zero::<f32>(&shape).unwrap();
                 let backoff = crossbeam_utils::Backoff::new();
+                let mut inference_count: u64 = 0;
 
                 while is_running_clone.load(Ordering::Acquire) {
                     if let Some(data_buffer) = queue_clone.pop() {
@@ -118,6 +126,8 @@ impl TransformerModel {
                                         output_view.as_slice().and_then(|s| s.first())
                                     {
                                         latest_prob_clone.store(Arc::new(prob as f64));
+                                        inference_count += 1;
+                                        prob_tick_clone.store(inference_count, Ordering::Release);
                                     }
                                 }
                             }
@@ -141,6 +151,8 @@ impl TransformerModel {
             queue,
             pool,
             latest_prob,
+            prob_tick,
+            call_count,
             is_running,
             _handle: Some(_handle),
         })
@@ -199,7 +211,21 @@ impl ProbabilityModel for TransformerModel {
             }
         }
 
-        **self.latest_prob.load()
+        let call = self.call_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let last_inference = self.prob_tick.load(Ordering::Acquire);
+        let prob = **self.latest_prob.load();
+        // If inference hasn't run yet, return neutral prior.
+        if last_inference == 0 {
+            return 0.5;
+        }
+        // If inference is more than 60 calls behind, the inference thread is
+        // likely stalled or the queue is full. Return neutral prior so the
+        // strategy falls back to the Gaussian filter.
+        if call.saturating_sub(last_inference) > 60 {
+            warn!("transformer inference is stale by {} calls; returning neutral prior", call - last_inference);
+            return 0.5;
+        }
+        prob
     }
 }
 

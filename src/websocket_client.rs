@@ -114,6 +114,9 @@ pub enum WebSocketCommand {
         contract_id: u64,
         req_id: u32,
     },
+    ForgetAll {
+        req_id: u32,
+    },
 }
 
 #[derive(Serialize)]
@@ -163,6 +166,13 @@ struct ProposalOpenContractRequest {
     proposal_open_contract: u8,
     contract_id: u64,
     subscribe: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    req_id: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct ForgetAllRequest {
+    forget_all: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     req_id: Option<u32>,
 }
@@ -385,6 +395,12 @@ impl DerivWebSocketClient {
                                 proposal_open_contract: 1,
                                 contract_id,
                                 subscribe: 1,
+                                req_id: Some(req_id),
+                            }).await?;
+                        }
+                        WebSocketCommand::ForgetAll { req_id } => {
+                            self.send_json(&write_tx, &ForgetAllRequest {
+                                forget_all: 1,
                                 req_id: Some(req_id),
                             }).await?;
                         }

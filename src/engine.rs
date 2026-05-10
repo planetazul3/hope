@@ -95,6 +95,7 @@ struct Engine {
     buffered_close_event: Option<(u64, f64)>,
     tracked_contracts: Arc<RwLock<BTreeSet<u64>>>,
     tick_count: u64,
+    last_tick_epoch: u64,
 }
 
 impl Engine {
@@ -190,6 +191,7 @@ impl Engine {
             buffered_close_event: None,
             tracked_contracts,
             tick_count: 0,
+            last_tick_epoch: 0,
         }
     }
 
@@ -247,6 +249,7 @@ impl Engine {
             WebSocketEvent::Tick(tick) => {
                 self.tick_count += 1;
                 let tick_started_at = Instant::now();
+                self.last_tick_epoch = tick.epoch;
                 let snapshot = self.tick_processor.push(tick.epoch, tick.quote);
                 self.execution.on_tick(snapshot.epoch, tick_started_at);
 
@@ -289,6 +292,10 @@ impl Engine {
                                 self.tracked_contracts.write().remove(&contract_id);
                                 // ADR 0008: Register forced clear as a loss to prevent risk manager bypass
                                 let _ = self.risk.on_trade_closed(-self.config.stake);
+                                // Cancel the open-contract subscription so Deriv stops
+                                // streaming updates for this orphaned contract.
+                                let req_id = self.next_req_id();
+                                let _ = try_send_forget_all(&mut self.execution, command_tx, tick_started_at, req_id);
                             }
                             self.set_active_contract(None);
                             self.contract_started_at = None;
@@ -329,8 +336,19 @@ impl Engine {
                 }
 
                 if let Some(ready) = self.pending_proposal.take() {
-                    if tick_started_at.duration_since(ready.received_at) > self.proposal_timeout {
-                        warn!("discarding stale proposal");
+                    let wall_clock_stale =
+                        tick_started_at.duration_since(ready.received_at) > self.proposal_timeout;
+                    // Also discard if the market has moved more than duration_ticks ticks
+                    // since the proposal was priced — Deriv will reject it anyway.
+                    let tick_age = self.last_tick_epoch.saturating_sub(ready.received_epoch);
+                    let tick_stale = tick_age > self.config.duration_ticks as u64 * 2;
+                    if wall_clock_stale || tick_stale {
+                        warn!(
+                            wall_clock_stale,
+                            tick_stale,
+                            tick_age,
+                            "discarding stale proposal"
+                        );
                         self.safe_reset();
                         // Ensure any pending request ID associated with this lifecycle is cleared
                         self.pending_req_id = None;
@@ -505,6 +523,7 @@ impl Engine {
                             quote,
                             probability_up,
                             received_at: Instant::now(),
+                            received_epoch: self.last_tick_epoch,
                         });
                         if self.fsm.state() != TradingState::OrderPending {
                             self.safe_reset();
@@ -773,6 +792,20 @@ fn try_send_buy(
     Ok(())
 }
 
+fn try_send_forget_all(
+    execution: &mut ExecutionEngine,
+    command_tx: &mpsc::Sender<WebSocketCommand>,
+    now: Instant,
+    req_id: u32,
+) -> std::result::Result<(), crate::execution::ExecutionSkipReason> {
+    let guard = execution.permit_api_call(now, false)?;
+    command_tx
+        .try_send(WebSocketCommand::ForgetAll { req_id })
+        .map_err(|_| crate::execution::ExecutionSkipReason::InternalQueueFull)?;
+    guard.commit();
+    Ok(())
+}
+
 fn signal_label(signal: SignalDirection) -> &'static str {
     match signal {
         SignalDirection::Up => "proposal_call",
@@ -785,6 +818,7 @@ struct PendingProposal {
     quote: ProposalQuote,
     probability_up: f64,
     received_at: Instant,
+    received_epoch: u64,
 }
 
 #[cfg(test)]
@@ -905,6 +939,7 @@ mod tests {
             },
             probability_up: 0.6,
             received_at: Instant::now() - Duration::from_secs(61),
+            received_epoch: 1000,
         });
         engine.fsm.transition(TradingState::OrderPending)?;
 
@@ -938,6 +973,7 @@ mod tests {
             },
             probability_up: 0.6,
             received_at: Instant::now(),
+            received_epoch: 100,
         });
 
         engine.pending_req_id = Some(123);

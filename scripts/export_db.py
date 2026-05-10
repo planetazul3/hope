@@ -9,8 +9,10 @@ import argparse
 import gzip
 import logging
 import os
-import sqlite3          # <-- ADD THIS
+import shutil
+import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -179,6 +181,13 @@ def export_ticks(args: argparse.Namespace) -> None:
 
         logger.info("Exporting %d ticks...", total_rows)
 
+        # Use a temporary file to prevent corruption on crash
+        tmp_fd, tmp_csv_path = tempfile.mkstemp(
+            suffix=".csv.tmp",
+            dir=os.path.dirname(csv_path) or ".",
+        )
+        os.close(tmp_fd)
+
         chunk_iter = pd.read_sql_query(query, conn, params=params, chunksize=args.chunk_size)
         first_chunk = True
         last_states = {}
@@ -208,9 +217,9 @@ def export_ticks(args: argparse.Namespace) -> None:
 
         with tqdm(total=total_rows, desc="Exporting", unit="ticks") as pbar:
             for chunk in chunk_iter:
-                # CSV
+                # CSV (write to temp file)
                 header = first_chunk and mode == 'w'
-                chunk.to_csv(csv_path, index=False, header=header, mode='a' if not first_chunk else mode, compression=compression)
+                chunk.to_csv(tmp_csv_path, index=False, header=header, mode='a' if not first_chunk else 'w', compression=None)
 
                 # Parquet
                 if use_parquet:
@@ -237,12 +246,26 @@ def export_ticks(args: argparse.Namespace) -> None:
         if use_parquet and parquet_writer:
             parquet_writer.close()
 
+        # Atomic rename: move temp file to final location only after all chunks succeed
+        if compression:
+            # Apply compression to the temp file before renaming
+            with open(tmp_csv_path, 'rb') as f_in:
+                with gzip.open(csv_path, 'wb') as f_out:
+                    f_out.writelines(f_in)
+            os.unlink(tmp_csv_path)
+        else:
+            shutil.move(tmp_csv_path, csv_path)
+
         logger.info("Successfully exported to %s", csv_path)
         if use_parquet:
             logger.info("Parquet file also created at %s", parquet_path)
 
     except Exception:
         logger.exception("Export failed")
+        try:
+            os.unlink(tmp_csv_path)
+        except (OSError, NameError):
+            pass
         sys.exit(1)
     finally:
         conn.close()
