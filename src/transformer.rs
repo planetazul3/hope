@@ -222,7 +222,10 @@ impl ProbabilityModel for TransformerModel {
         // likely stalled or the queue is full. Return neutral prior so the
         // strategy falls back to the Gaussian filter.
         if call.saturating_sub(last_inference) > 60 {
-            warn!("transformer inference is stale by {} calls; returning neutral prior", call - last_inference);
+            warn!(
+                "transformer inference is stale by {} calls; returning neutral prior",
+                call - last_inference
+            );
             return 0.5;
         }
         prob

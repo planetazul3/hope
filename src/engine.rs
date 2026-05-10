@@ -295,7 +295,12 @@ impl Engine {
                                 // Cancel the open-contract subscription so Deriv stops
                                 // streaming updates for this orphaned contract.
                                 let req_id = self.next_req_id();
-                                let _ = try_send_forget_all(&mut self.execution, command_tx, tick_started_at, req_id);
+                                let _ = try_send_forget_all(
+                                    &mut self.execution,
+                                    command_tx,
+                                    tick_started_at,
+                                    req_id,
+                                );
                             }
                             self.set_active_contract(None);
                             self.contract_started_at = None;
@@ -345,9 +350,7 @@ impl Engine {
                     if wall_clock_stale || tick_stale {
                         warn!(
                             wall_clock_stale,
-                            tick_stale,
-                            tick_age,
-                            "discarding stale proposal"
+                            tick_stale, tick_age, "discarding stale proposal"
                         );
                         self.safe_reset();
                         // Ensure any pending request ID associated with this lifecycle is cleared
