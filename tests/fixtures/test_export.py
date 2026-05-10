@@ -25,7 +25,7 @@ class TestModelExport(unittest.TestCase):
         model = SimpleModel()
         dummy_input = torch.randn(1, 16, 5)
         export_path = "tests/fixtures/test_model.onnx"
-        torch.onnx.export(model, dummy_input, export_path)
+        torch.onnx.export(model, dummy_input, export_path, dynamo=False)
 
         sess = onnxruntime.InferenceSession(export_path)
         test_input = np.random.randn(1, 16, 5).astype(np.float32)
